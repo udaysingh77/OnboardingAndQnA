@@ -57,13 +57,13 @@ src/
 ├─ utils/           logger.js (Pino), token.js (JWT)
 ├─ middlewares/     auth.js (JWT), rateLimiter.js
 ├─ modules/
-│  ├─ auth/         services/otp/{interface,factory,mock} + tokenBlacklist.js
+│  ├─ auth/         services/otp/{interface,factory,mock,msg91} + tokenBlacklist.js
 │  ├─ user/         controllers/services/repositories/validators
 │  ├─ registration/  "
 │  ├─ conversation/ services/conversation.router.js + engines/{aiEngine,registrationEngine}.js
 │  └─ health/
 ├─ app.js           middleware + route assembly
-└─ server.js        bootstrap + graceful shutdown
+└─ server.js        DB connectivity check (fail-fast) + bootstrap + graceful shutdown
 prisma/             schema.prisma (no migrations/ folder - schema comes from the SQL dump)
 scripts/            setup-db.ps1
 test/               smoke.test.js
@@ -95,18 +95,19 @@ Use `ok(res, { data, meta?, status? })`, `created(res, data)`, `accepted(res)`.
 { "success": false, "error": { "code": "...", "message": "...", "details"? } }
 ```
 
-**Error classes** in `src/shared/errors.js` (`AppError` base + subclasses):
-- `BadRequestError` (400, `BAD_REQUEST`)
-- `UnauthorizedError` (401, `UNAUTHORIZED`)
-- `ForbiddenError` (403, `FORBIDDEN`)
-- `NotFoundError` (404, `NOT_FOUND`)
-- `ConflictError` (409, `CONFLICT`)
-- `ValidationError` (422, `VALIDATION_ERROR`)
+**Error factories** in `src/shared/errors.js` (function-based; each returns a real `Error` shaped for the central handler):
+- `badRequestError` (400, `BAD_REQUEST`)
+- `unauthorizedError` (401, `UNAUTHORIZED`)
+- `forbiddenError` (403, `FORBIDDEN`)
+- `notFoundError` (404, `NOT_FOUND`)
+- `conflictError` (409, `CONFLICT`)
+- `validationError` (422, `VALIDATION_ERROR`)
+- `appError` (generic; default 500, `INTERNAL_ERROR`)
 
-Central handler maps:
+Central handler (`shared/errorHandler.js`) maps:
 - **Zod errors** → 422 `VALIDATION_ERROR` (with `details`)
-- **Prisma** `P2002` → 409, `P2025` → 404, other integrity → 400
-- **JWT** verify failures → 401
+- **Prisma** `P2002` → 409, `P2025` → 404, `P2003`/`P2014` → 400, other known → 500
+- **JWT** verify failures → 401 (raised in `middlewares/auth.js`)
 - Malformed JSON body → 400
 - Unknown errors → sanitized 500 (never leak internals); logged with full stack.
 
@@ -145,7 +146,11 @@ Schemas are objects shaped `{ body?, query?, params? }`. Always call `.parse`; Z
   `npx prisma db pull` rather than hand-writing. `@db.Money` columns are typed `Float`, not `Decimal`.
 - No migrations are used: the schema is imported from the production dump (`scripts/mra_cleaned.sql`), so
   there is no `prisma/migrations/` folder. Only run `prisma:migrate` after adding brand-new tables.
-- Use the shared singleton from `shared/prisma.js` in repositories.
+- Use the shared singleton from `shared/prisma.js` in repositories. It exposes `pingDatabase()`
+  (a `SELECT 1` probe) used by `server.js` at boot and by the health service.
+- Prisma is pinned to v5 (`prisma` + `@prisma/client` `^5.22.0`). **Do not upgrade to v6/v7** —
+  it's a breaking change (mandatory `prisma.config.ts`, driver adapters, new generator) with no benefit
+  for this milestone. If you ever do, treat it as a dedicated migration task.
 
 ## Pluggable Providers (design extension points)
 

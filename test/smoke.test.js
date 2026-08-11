@@ -1,6 +1,6 @@
 ﻿// ==================================================================
 // Smoke tests - health + auth round-trip (node:test).
-// DB-dependent tests are skipped automatically when MySQL is down.
+// DB-dependent tests are skipped automatically when SQL Server is unreachable.
 // Run: npm test
 // ==================================================================
 import { test, before, after } from 'node:test';
@@ -59,7 +59,7 @@ test('invalid body is rejected with 422', async () => {
 });
 
 test('auth round-trip: send-otp -> verify-otp -> protected endpoint', async (t) => {
-  if (!dbAvailable) return t.skip('MySQL is not reachable');
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
   if ((process.env.OTP_PROVIDER ?? 'mock') !== 'mock') {
     return t.skip('OTP round-trip only works with the mock provider (real OTP is sent via SMS)');
   }
