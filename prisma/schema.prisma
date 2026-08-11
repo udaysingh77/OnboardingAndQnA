@@ -1,0 +1,443 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model AppAccounts {
+  AccountId                  BigInt    @id(map: "PK_AccountMaster") @default(autoincrement())
+  BusinessUnitId             BigInt?
+  BranchId                   BigInt?
+  AccountGroupId             BigInt
+  AccountCode                String?   @db.NVarChar(50)
+  RefAccountCode             String?   @db.NVarChar(50)
+  AccountType                String?   @db.NVarChar(5)
+  AccountRegType             String?   @db.NVarChar(5)
+  AccountName                String?   @db.NVarChar(100)
+  AccountAlias               String?   @db.NVarChar(200)
+  AccountDetails             String?   @db.NVarChar(500)
+  AccountCategoryId          BigInt?
+  AccountCategoryIds         String?
+  AccountAllianceId          BigInt?
+  CreditLimit                Float?    @db.Money
+  CreditDay                  Int?      @db.SmallInt
+  CreditPer                  Decimal?  @default(0, map: "DF_LedgerMaster_CreditPer") @db.Decimal(12, 2)
+  Detail1                    String?   @db.NVarChar(100)
+  Detail2                    String?   @db.NVarChar(100)
+  Detail3                    String?   @db.NVarChar(100)
+  Detail4                    String?   @db.NVarChar(100)
+  Detail5                    String?   @db.NVarChar(100)
+  Detail6                    String?   @db.NVarChar(100)
+  Detail7                    String?   @db.NVarChar(100)
+  Detail8                    String?   @db.NVarChar(100)
+  Detail9                    String?   @db.NVarChar(100)
+  Detail10                   String?   @db.NVarChar(100)
+  Detail11                   String?   @db.NVarChar(100)
+  Detail12                   String?   @db.NVarChar(100)
+  BankName                   String?   @db.NVarChar(100)
+  BankAcNo                   String?   @db.NVarChar(50)
+  BankSwift                  String?   @db.NVarChar(50)
+  BankIFSCCode               String?   @db.NVarChar(50)
+  AccountAddress             String?   @db.NVarChar(255)
+  GeographicalId             BigInt?
+  BookId                     BigInt?
+  Pincode                    String?   @db.NVarChar(100)
+  PincodeId                  BigInt?
+  GeographicalName           String?   @db.NVarChar(100)
+  AccountPhone               String?   @db.NVarChar(100)
+  AccountMobile              String?   @db.NVarChar(100)
+  AccountMobile_Alt          String?   @db.NVarChar(100)
+  AccountAddress_PR          String?   @db.NVarChar(255)
+  Pincode_PR                 String?   @db.NVarChar(50)
+  PincodeId_PR               BigInt?
+  GeographicalId_PR          BigInt?
+  GeographicalName_PR        String?   @db.NVarChar(100)
+  Alt_EmailId                String?   @db.NVarChar(100)
+  AccountEmail               String?   @db.NVarChar(100)
+  AccountPassword            String?   @db.NVarChar(500)
+  AccountWeb                 String?   @db.NVarChar(50)
+  TaxMasterId                BigInt?   @default(0, map: "DF_LedgerMaster_TaxMasterId")
+  MessageType                Int?      @default(0, map: "DF_LedgerMaster_MessageType") @db.TinyInt
+  MessagePrompt              String?   @db.NVarChar(200)
+  RegistrationDate           DateTime? @db.DateTime
+  LedgerType                 Int?      @db.TinyInt
+  CreditPrompt               Int?      @default(0, map: "DF__AccountMa__Credi__629F5583") @db.TinyInt
+  DOB                        DateTime? @db.DateTime
+  PlaceOfBirth               String?   @db.NVarChar(100)
+  Nationality                String?   @db.NVarChar(50)
+  BankBranchName             String?   @db.NVarChar(100)
+  MicrCode                   String?   @db.NVarChar(50)
+  RollTypeIds                String?   @db.NVarChar(50)
+  RecordStatus               Int?      @default(0, map: "DF_AccountMaster_AccountStatus") @db.TinyInt
+  EntityType                 String?   @db.NVarChar(10)
+  ApplicationStatus          Int?      @db.TinyInt
+  OverseasSocietyName        String?   @db.NVarChar(150)
+  AssociationName_India      String?   @db.NVarChar(150)
+  ReUpdateInfo               String?   @db.NVarChar(100)
+  TDSRate                    Float?    @db.Real
+  TDSAccountId               BigInt?
+  KindAttention1             String?   @db.NVarChar(100)
+  KindAttention2             String?   @db.NVarChar(100)
+  AccountImage               String?   @db.NVarChar(100)
+  FileRefNo                  String?   @db.NVarChar(50)
+  FatherName                 String?   @db.NVarChar(100)
+  FirstName                  String?   @db.NVarChar(30)
+  LastName                   String?   @db.NVarChar(45)
+  Gender                     String?   @db.NVarChar(11)
+  PreferredLanguage          String?   @db.NVarChar(100)
+  PreferredLanguageId        BigInt?
+  SystemType                 String?   @db.NVarChar(1)
+  BillingType                Int?      @db.TinyInt
+  DeviceId_RowId             String?   @db.NVarChar(50)
+  CreateDate                 DateTime? @default(now(), map: "DF_App_AccountMaster_CreateDate") @db.DateTime
+  CreatedBy                  String?   @db.NVarChar(100)
+  ModifedBy                  String?   @db.NVarChar(100)
+  ModifedDate                DateTime? @default(now(), map: "DF_App_AccountMaster_ModifedDate") @db.DateTime
+  AdmissionStatus            Int?      @default(0, map: "DF_App_Accounts_AdmissionStatus") @db.TinyInt
+  AdmissionDate              DateTime? @db.DateTime
+  AdmissionBy                String?   @db.NVarChar(100)
+  AdmissionRemark            String?
+  DateOfDeath                DateTime? @db.DateTime
+  DeathCertificateNo         String?   @db.NVarChar(100)
+  Relationship               String?   @db.NVarChar(50)
+  Currency_Id                BigInt?
+  CurrencyName               String?   @db.NVarChar(50)
+  LanguageId                 BigInt?
+  LanguageName               String?   @db.NVarChar(100)
+  InternalIdentificationName String?   @db.NVarChar(50)
+  IPINumber                  String?   @db.NVarChar(100)
+  ChanlDesc                  String?   @db.NVarChar(Max)
+  SocialSecurityNo           String?   @db.NVarChar(100)
+  TRCNo                      String?   @db.NVarChar(100)
+  TenFform                   String?   @db.NVarChar(100)
+  DualNationality            Int?      @db.TinyInt
+  PreCountryId               BigInt?
+  PreCountryName             String?   @db.NVarChar(100)
+  PreState                   String?   @db.NVarChar(100)
+  PreCity                    String?   @db.NVarChar(100)
+  PreZipCode                 String?   @db.NVarChar(50)
+  PerCountryId               BigInt?
+  PerCountryName             String?   @db.NVarChar(100)
+  PerState                   String?   @db.NVarChar(100)
+  PerCity                    String?   @db.NVarChar(100)
+  PerZipCode                 String?   @db.NVarChar(50)
+  TeritoryAppFor             String?   @db.NVarChar(100)
+  MemberRegistrationDate     DateTime? @db.DateTime
+  SocietyId                  BigInt?
+  BankAccountName            String?   @db.VarChar(100)
+  Consent                    Int?      @default(0, map: "DF_App_Accounts_Consent_1") @db.TinyInt
+  PublicIP                   String?   @db.NVarChar(50)
+  Macid                      String?   @db.NVarChar(50)
+  GUID                       String?   @db.NVarChar(50)
+  ConsentDate                DateTime? @db.DateTime
+  misasiaMemIntNo            String?   @db.NVarChar(50)
+  requestId                  BigInt?
+  requestDate                DateTime? @db.DateTime
+  ResponseRemark             String?   @db.NVarChar(Max)
+  misasiaStaus               Int       @default(0, map: "DF_App_Accounts_misasiaStaus_1") @db.TinyInt
+
+  @@map("App_Accounts")
+}
+
+model AppAccountsDoc {
+  AccountDocId     BigInt    @id(map: "PK_App_Accounts_Doc") @default(autoincrement())
+  AccountId        BigInt?
+  DocumentLookupId BigInt?
+  ApprovalType     String?   @db.NVarChar(5)
+  DocumentName     String?   @db.NVarChar(500)
+  DocStatus        Int?      @db.TinyInt
+  DocumentCaption  String?   @db.NVarChar(100)
+  DocFileName      String?   @db.NVarChar(100)
+  DocUploadDesc    String?   @db.NVarChar(100)
+  CreateDate       DateTime? @default(now(), map: "DF_App_Accounts_Doc_CreateDate") @db.DateTime
+  CreatedBy        String?   @db.NVarChar(100)
+  ModifedBy        String?   @db.NVarChar(100)
+  ModifedDate      DateTime? @default(now(), map: "DF_App_Accounts_Doc_ModifedDate") @db.DateTime
+
+  @@map("App_Accounts_Doc")
+}
+
+model AppAccountsWorkRegistration {
+  WorkNotificationId BigInt    @id(map: "PK_App_Accounts_WorkNotification") @default(autoincrement())
+  AccountId          BigInt?
+  SongName           String?   @db.NVarChar(100)
+  Film_AlbumName     String?   @db.NVarChar(100)
+  LanguageNames      String?   @db.NVarChar(100)
+  WorkCategory       String?   @db.NVarChar(100)
+  Artist_Singers     String?   @db.NVarChar(500)
+  Author_Composer    String?   @db.NVarChar(100)
+  Publisher          String?   @db.NVarChar(100)
+  Author_Lyricist    String?   @db.NVarChar(100)
+  DigitalLink        String?   @db.NVarChar(500)
+  DocLink            String?   @db.NVarChar(100)
+  ReleaseYear        BigInt?
+  CreateDate         DateTime? @default(now(), map: "DF_App_Accounts_WorkNotification_CreateDate") @db.DateTime
+  CreatedBy          String?   @db.NVarChar(100)
+  ModifedBy          String?   @db.NVarChar(100)
+  ModifedDate        DateTime? @default(now(), map: "DF_App_Accounts_WorkNotification_ModifedDate") @db.DateTime
+
+  @@map("App_Accounts_WorkRegistration")
+}
+
+model AppBookMain {
+  BookType            String    @id(map: "PK_BookMain") @db.NVarChar(50)
+  BookName            String    @db.NVarChar(50)
+  IsBookPost          Int       @default(0, map: "DF_BookMain_IsBookPost") @db.TinyInt
+  StockEffect         String    @db.NVarChar(1)
+  Status              Int       @default(0, map: "DF_BookMain_Status") @db.TinyInt
+  BookTable           String?   @db.NVarChar(50)
+  BookKey             String?   @db.NVarChar(50)
+  BookModule          String?   @db.NVarChar(3)
+  LastTransactionDate DateTime? @db.DateTime
+
+  @@map("App_BookMain")
+}
+
+model AppBookMaster {
+  BookID                    BigInt    @id(map: "PK_BookMaster")
+  BusinessUnitId            BigInt?
+  BranchId                  BigInt?
+  BookType                  String?   @db.NVarChar(2)
+  BookCode                  String?   @db.NVarChar(10)
+  BookPrefix                String?   @db.NVarChar(10)
+  BookSrNo                  Int?      @db.SmallInt
+  BookGroup                 String?   @db.NVarChar(50)
+  BookName                  String?   @db.NVarChar(100)
+  BookAlias                 String?   @db.NVarChar(100)
+  TDSAccountId              String?   @db.NVarChar(100)
+  AuthorizationLevel        Int?      @db.TinyInt
+  ReAuthorizationLevel      Int?      @db.TinyInt
+  AdvAuthorizationLevel     Int?      @default(0, map: "DF_App_BookMaster_AdvAuthorizationLevel") @db.TinyInt
+  DiscAuthorizationLevel    Int?      @db.TinyInt
+  GeographicalIds           String?   @db.NVarChar(200)
+  EmailId                   String?   @db.NVarChar(250)
+  StockEffect               String?   @db.NVarChar(1)
+  AccountEffect             String?   @db.NVarChar(2)
+  AccountId                 BigInt?
+  RoundUpId                 BigInt?
+  PostingId                 BigInt?
+  BankId                    BigInt?
+  BookDescription           String?   @db.NVarChar(255)
+  BookStatus                Int?      @db.TinyInt
+  FixedBook                 Int?      @db.TinyInt
+  QCRequired                Int?      @db.TinyInt
+  NoBilling                 Int?      @db.TinyInt
+  NoInventory               Int?      @db.TinyInt
+  BookCondition             String?
+  PrefixMain                String?   @db.NVarChar(1)
+  PrefixSub                 String?   @db.NVarChar(1)
+  PrefixFixed               String?   @db.NVarChar(8)
+  PrefixSerial              String?   @db.NVarChar(1)
+  PrefixPrint               String?   @db.NVarChar(5)
+  IsTaxable                 Int?      @db.TinyInt
+  ProductGroups             String?   @db.NVarChar(4000)
+  AccountCategoryIds        String?   @db.NVarChar(4000)
+  ProductCategoryIds        String?   @db.NVarChar(4000)
+  ProductOnlineCategoryIds  String?   @db.NVarChar(4000)
+  StoreLocationIds          String?   @db.NVarChar(4000)
+  DepartmentIds             String?   @db.NVarChar(4000)
+  TaxMasterIds              String?   @db.NVarChar(4000)
+  CurrencyId                BigInt?
+  TermsConditionIds         String?   @db.NVarChar(4000)
+  LetterDraftIds            String?   @db.NVarChar(4000)
+  ParentBookIds             String?   @db.NVarChar(4000)
+  ReportIds                 String?   @db.NVarChar(4000)
+  UserIds                   String?   @db.NVarChar(4000)
+  WorkGroupIds              String?   @db.NVarChar(4000)
+  ParentBookType            String?   @db.NVarChar(2)
+  ApprovalLevel             Int?      @db.TinyInt
+  Approval1UserId           BigInt?
+  Approval2UserId           BigInt?
+  DisplayRate               Int?      @db.TinyInt
+  MessageType               Int?      @db.TinyInt
+  MessagePrompt             String?   @db.NVarChar(200)
+  NoTaxDuties               Int?      @db.TinyInt
+  NoTermsCondition          Int?      @db.TinyInt
+  NoPaymentSchedule         Int?      @db.TinyInt
+  NoReturnable              Int?      @db.TinyInt
+  ParentBookRestrict        Int?      @db.TinyInt
+  CopyAttachment            Int?      @db.TinyInt
+  PlanFormula               String?   @db.NVarChar(500)
+  LockRate                  Int?      @default(0, map: "DF_BookMaster_LockRate") @db.TinyInt
+  InstantEmail              Int?      @default(0, map: "DF_BookMaster_InstantEmail") @db.TinyInt
+  OnlyAccounting            Int?      @default(0, map: "DF_BookMaster_OnlyAccounting") @db.TinyInt
+  CreditCardId              BigInt?
+  CouponId                  BigInt?
+  ContactUs                 String?
+  InstantPrint              Int?      @default(0, map: "DF_BookMaster_InstantPrint") @db.TinyInt
+  ChangeAccount             Int?      @default(0, map: "DF_BookMaster_ChangeAccount") @db.TinyInt
+  ProcessCheckList          Int?      @default(0, map: "DF_BookMaster_ProcessCheckList") @db.TinyInt
+  ProductACPost             Int?      @default(0, map: "DF_BookMaster_ProductACPost") @db.TinyInt
+  RecursivePlan             Int?      @default(0, map: "DF_BookMaster_RecursivePlan") @db.SmallInt
+  TaxChargeLevel            Int?      @default(0, map: "DF_BookMaster_TaxChargeLevel") @db.TinyInt
+  StockValidate             Int?      @db.TinyInt
+  PaymentReceipt            String?   @db.NVarChar(1)
+  DisplayVenue              String?   @db.NVarChar(1)
+  DisplaySong               String?   @db.NVarChar(1)
+  AuthorisedSignatoryUserId BigInt?
+  AuthorisedSignatoryUser   String?   @db.NVarChar(100)
+  CreateDate                DateTime? @default(now(), map: "DF_BookMaster_CreateDate") @db.DateTime
+  CreatedBy                 String?   @db.NVarChar(100)
+  ModifedBy                 String?   @db.NVarChar(100)
+  ModifedDate               DateTime? @default(now(), map: "DF_BookMaster_ModifedDate") @db.DateTime
+
+  @@map("App_BookMaster")
+}
+
+model AppEmailSMSSchedule {
+  EmailSMSScheduleId           BigInt    @id(map: "PK_EmailSMSSchedule") @default(autoincrement())
+  BusinessUnitIds              String?
+  BranchIds                    String?
+  BookType                     String?   @db.NVarChar(50)
+  EmailType                    String?   @db.NVarChar(10)
+  DocumentNo                   String?   @db.NVarChar(50)
+  DocumentId                   BigInt?
+  EmailSMSConfigId             BigInt?
+  EmailSMSDate                 DateTime  @default(now(), map: "DF_EmailSMSSchedule_EmailSMSDate") @db.DateTime
+  ConfigurationType            Int?      @default(0, map: "DF_EmailSMSSchedule_ConfigurationType") @db.TinyInt
+  ReportType                   Int?      @default(0, map: "DF_EmailSMSSchedule_ReportType") @db.TinyInt
+  EmailSMTPId                  BigInt?
+  EmailFromAddress             String?
+  EmailToAddress               String?   @db.NVarChar(4000)
+  EmailCCAddress               String?   @db.NVarChar(4000)
+  EmailBCCAddress              String?   @db.NVarChar(4000)
+  EmailSubject                 String?
+  EmailStartLine               String?
+  EmailContent                 String?   @db.NText
+  EmailSignature               String?   @db.NText
+  EmailAttach                  String?
+  DocumentAttach               String?
+  EmailReportValue             String?   @db.NVarChar(4000)
+  ReportParameterName          String?   @db.NVarChar(4000)
+  ReportParameterValue         String?   @db.NVarChar(4000)
+  FromDate                     DateTime? @default(now(), map: "DF_EmailSMSSchedule_FromDate") @db.DateTime
+  ToDate                       DateTime? @default(now(), map: "DF_EmailSMSSchedule_ToDate") @db.DateTime
+  EmailSMSId                   BigInt?
+  SMSTo                        String?   @db.NVarChar(250)
+  SMSURL                       String?   @db.NVarChar(4000)
+  EmailSMSScheduleStatus       Int?      @default(0, map: "DF_EmailSMSSchedule_EmailSMSSchedule") @db.TinyInt
+  EmailSMSScheduleStatusRemark String?   @db.NVarChar(4000)
+  LetterDraft1                 String?   @db.NText
+  LetterDraft2                 String?   @db.NText
+  LetterDraft3                 String?   @db.NText
+
+  @@map("App_EmailSMSSchedule")
+}
+
+model AppGeographical {
+  GeographicalId        BigInt    @id(map: "PK_App_Geogrphical") @default(autoincrement())
+  GeographicalLevel     Int?      @default(1, map: "DF_App_Geogrphical_GeographiclaLevel") @db.TinyInt
+  GroupId               BigInt?
+  GeographicalName      String?   @db.NVarChar(100)
+  GeographicalCode      String?   @db.NVarChar(10)
+  GeographicalDetails   String?   @db.NVarChar(255)
+  GeographicalCatTypeId BigInt?
+  GeographicalTypeId    BigInt?
+  RecordStatus          Int?      @default(0, map: "DF_App_Geographical_RecordStatus") @db.TinyInt
+  UserIds               String?   @db.NVarChar(Max)
+  CreateDate            DateTime? @default(now(), map: "DF_App_Geographical_CreateDate") @db.DateTime
+  CreatedBy             String?   @db.NVarChar(100)
+  ModifedBy             String?   @db.NVarChar(100)
+  ModifedDate           DateTime? @default(now(), map: "DF_App_Geographical_ModifedDate") @db.DateTime
+  RMSCODE               String?   @db.NVarChar(50)
+
+  @@map("App_Geographical")
+}
+
+model AppSociety {
+  SocietyId   BigInt  @id(map: "PK_App_Society") @default(autoincrement())
+  SocietyName String? @db.NVarChar(50)
+
+  @@map("App_Society")
+}
+
+model DocLookUp {
+  DocumentLookupId BigInt  @id(map: "PK_Doc_LookUp")
+  DocumentType     String? @db.NVarChar(10)
+  DocSubType       String? @db.NVarChar(10)
+  DocumentName     String? @db.NVarChar(500)
+  DocumentStatus   Int?    @db.TinyInt
+  SerialNo         BigInt?
+  IsCompulsary     Int?    @db.TinyInt
+  LinkURL          String? @db.NVarChar(500)
+  Description      String? @db.NVarChar(500)
+  tFlag            Int?    @db.TinyInt
+
+  @@map("Doc_LookUp")
+}
+
+model MemberRolesLookup {
+  MemberRoleId     Int     @id(map: "PK_MemberRoles_Lookup_1") @db.SmallInt
+  MemberRoleCode   String  @db.NVarChar(5)
+  MemberRoleName   String? @db.NVarChar(100)
+  MemberRoleStatus String? @default("N'Y'", map: "DF_MemberRoles_Lookup_MemberRoleStatus") @db.NVarChar(1)
+
+  @@map("MemberRoles_Lookup")
+}
+
+model MemberRoleTypeLookUp {
+  MemberRoleTypeId BigInt  @id(map: "PK_MemberRoleType_LookUp") @default(autoincrement())
+  RegistrationType String? @db.NVarChar(5)
+  MemberRoleType   String? @db.NVarChar(50)
+  RoleType         String? @db.NVarChar(10)
+  SR_No            Int?    @db.TinyInt
+  status           String? @db.NChar(10)
+
+  @@map("MemberRoleType_LookUp")
+}
+
+model AppAccountsTemp {
+  TempAccountId    BigInt    @default(autoincrement())
+  AccountName      String?   @db.NVarChar(100)
+  AccountType      String?   @db.NVarChar(5)
+  AccountRegType   String?   @db.NVarChar(5)
+  AccountRegDate   DateTime? @db.DateTime
+  AccountAlias     String?   @db.NVarChar(200)
+  AccountAddress   String?   @db.NVarChar(255)
+  GeographicalId   BigInt?
+  GeographicalName String?   @db.NVarChar(200)
+  BookId           BigInt?
+  Pincode          String?   @db.NVarChar(100)
+  PincodeId        BigInt?
+  Alt_EmailId      String?   @db.NVarChar(100)
+  Mobile           String?   @db.NVarChar(50)
+  Telephone        String?   @db.NVarChar(50)
+  AccoutnLogin     String?   @db.NVarChar(100)
+  AccountPassword  String?   @db.NVarChar(100)
+  AccountWeb       String?   @db.NVarChar(100)
+  AadharNo         String?   @db.NVarChar(20)
+  PanNo            String?   @db.NVarChar(10)
+  TANNo            String?   @db.NVarChar(10)
+  TINNo            String?   @db.NVarChar(10)
+  GSTNo            String?   @db.NVarChar(15)
+  CINNo            String?   @db.NVarChar(50)
+  TDSRate          Int?      @db.TinyInt
+  TDSAccountId     BigInt?
+  RollTypeIds      String?   @db.NVarChar(50)
+  CompanyName      String?   @db.NVarChar(100)
+  KindAttention1   String?   @db.NVarChar(100)
+  KindAttention2   String?   @db.NVarChar(100)
+  CreateDate       DateTime? @default(now(), map: "DF_App_Accounts_Temp_CreateDate") @db.DateTime
+  AccountCode      String?   @db.NVarChar(50)
+  RelationShip     String?   @db.NVarChar(50)
+  Consent          Int?      @default(0, map: "DF_App_Accounts_Temp_Consent_1") @db.TinyInt
+  PublicIP         String?   @db.NVarChar(50)
+  Macid            String?   @db.NVarChar(50)
+  ConsentDate      DateTime? @db.DateTime
+
+  @@map("App_Accounts_Temp")
+  @@ignore
+}
+
+model MemberRoleTypeLookUpFees {
+  LookupId     BigInt?
+  RoleType     String? @db.NVarChar(10)
+  RoleTypeFee  Float?  @db.Money
+  RoleTypeFee1 Float?  @db.Money
+
+  @@map("MemberRoleType_LookUp_Fees")
+  @@ignore
+}

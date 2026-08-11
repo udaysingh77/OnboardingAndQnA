@@ -1,0 +1,34 @@
+﻿// ==================================================================
+// App_Accounts repository (the "user" table) - data access only.
+// AccountId is a SQL Server bigint (Prisma BigInt); callers must
+// pass numbers/BigInt for ids and accept BigInt in results.
+// ==================================================================
+import { prisma } from '../../../shared/prisma.js';
+
+function create(data) {
+  return prisma.appAccounts.create({ data });
+}
+
+function findById(accountId) {
+  return prisma.appAccounts.findUnique({ where: { AccountId: BigInt(accountId) } });
+}
+
+function findByAccountMobile(mobile) {
+  return prisma.appAccounts.findFirst({ where: { AccountMobile: mobile } });
+}
+
+function findByEmail(email) {
+  return prisma.appAccounts.findFirst({ where: { AccountEmail: email } });
+}
+
+function update(accountId, data) {
+  return prisma.appAccounts.update({ where: { AccountId: BigInt(accountId) }, data });
+}
+
+export const userRepository = {
+  create,
+  findById,
+  findByAccountMobile,
+  findByEmail,
+  update,
+};
