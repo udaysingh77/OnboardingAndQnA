@@ -109,6 +109,7 @@ model AppAccounts {
   LanguageName               String?   @db.NVarChar(100)
   InternalIdentificationName String?   @db.NVarChar(50)
   IPINumber                  String?   @db.NVarChar(100)
+  PANNo                      String?   @db.NVarChar(10)
   ChanlDesc                  String?   @db.NVarChar(Max)
   SocialSecurityNo           String?   @db.NVarChar(100)
   TRCNo                      String?   @db.NVarChar(100)

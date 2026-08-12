@@ -1,15 +1,89 @@
-﻿// ==================================================================
-// Registration engine STUB (Week 1).
-// Later milestone: drives the onboarding/QnA conversation flow.
-// For now returns a deterministic dummy response so the router wiring
-// is testable end-to-end.
 // ==================================================================
+// Registration engine - drives the Typebot-based onboarding flow.
+// Relay model: this backend calls Typebot's Chat API on behalf of the
+// frontend (frontend never talks to Typebot directly) - see
+// modules/conversation/services/typebot/typebotClient.js. Session
+// state (Typebot's sessionId + current input block) lives in
+// typebotSessionStore. Response shape stays close to Typebot's own -
+// no custom transformation, since the frontend's exact expectations
+// aren't specified; adjust here if it needs a different shape.
+// ==================================================================
+import { badRequestError } from '../../../shared/errors.js';
+import { registrationService } from '../../registration/services/registration.service.js';
+import { typebotClient } from '../services/typebot/typebotClient.js';
+import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
+import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
+
 /**
- * @param {{ userId: string, message: string }} input
- * @returns {Promise<{ reply: string, nextStep?: string }>}
+ * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
-export async function handle(input) {
+export async function handle({ userId, token, message, attachedFileUrls }) {
+  const existing = typebotSessionStore.get(userId);
+
+  const response = existing
+    ? await typebotClient.continueChat({
+        sessionId: existing.sessionId,
+        message: { type: 'text', text: message ?? '', attachedFileUrls },
+      })
+    : await typebotClient.startChat({
+        prefilledVariables: { token, registrationId: userId },
+      });
+
+  // continueChat's response doesn't repeat sessionId - keep the one we already have.
+  const sessionId = existing ? existing.sessionId : response.sessionId;
+  const ended = !response.input;
+
+  if (ended) {
+    typebotSessionStore.clear(userId);
+  } else {
+    typebotSessionStore.set(userId, { sessionId, input: response.input });
+  }
+
   return {
-    reply: '[RegistrationEngine] Onboarding flow not yet implemented (Week 1).',
+    sessionEnded: ended,
+    messages: response.messages,
+    input: response.input ?? null,
+    progress: response.progress ?? null,
   };
+}
+
+// Handles a raw file upload for the current file-input step: gets a
+// presigned URL from Typebot, uploads the bytes, persists the document
+// (+ OCR, via the same saveDocument() the old Studio HTTP blocks used
+// to call) when the current block maps to a known document type, then
+// advances the conversation exactly like a normal message would.
+/**
+ * @param {{ userId: string, token: string, file: { originalname: string, mimetype: string, size: number, buffer: Buffer } }} input
+ */
+export async function handleUpload({ userId, token, file }) {
+  const session = typebotSessionStore.get(userId);
+  if (!session?.input || session.input.type !== 'file input') {
+    throw badRequestError('No active file-upload step in the conversation');
+  }
+
+  const { id: blockId, options } = session.input;
+  const variableId = options?.variableId;
+
+  const { presignedUrl, formData, fileUrl } = await typebotClient.generateUploadUrl({
+    sessionId: session.sessionId,
+    blockId,
+    fileName: file.originalname,
+    fileType: file.mimetype,
+    fileSize: file.size,
+  });
+
+  await typebotClient.uploadToPresignedUrl({
+    presignedUrl,
+    formData,
+    fileBuffer: file.buffer,
+    fileName: file.originalname,
+    fileType: file.mimetype,
+  });
+
+  const docType = resolveDocumentType(variableId);
+  if (docType) {
+    await registrationService.saveDocument(userId, userId, docType, fileUrl);
+  }
+
+  return handle({ userId, token, message: '', attachedFileUrls: [fileUrl] });
 }
