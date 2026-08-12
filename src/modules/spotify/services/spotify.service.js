@@ -14,7 +14,7 @@ function parseSpotifyReference(value) {
   }
 
   const cleaned = value.trim();
-  const uriMatch = cleaned.match(/^spotify:track:([A-Za-z0-9]+)$/i);
+  const uriMatch = cleaned.match(/^spotify:track:([A-Za-z0-9]{22})$/i);
   if (uriMatch) {
     return { type: 'track', id: uriMatch[1] };
   }
@@ -43,24 +43,6 @@ function getSpotifyEndpoint(type, id) {
   }
 
   return `${SPOTIFY_API_BASE}/tracks/${id}`;
-}
-
-function normalizeTrack(payload) {
-  return {
-    type: 'track',
-    id: payload.id,
-    name: payload.name,
-    artists: payload.artists.map((artist) => ({ id: artist.id, name: artist.name })),
-    album: {
-      id: payload.album.id,
-      name: payload.album.name,
-      images: payload.album.images,
-    },
-    duration_ms: payload.duration_ms,
-    explicit: payload.explicit,
-    preview_url: payload.preview_url,
-    spotify_url: payload.external_urls?.spotify ?? null,
-  };
 }
 
 function normalizeAlbum(payload) {
@@ -171,8 +153,6 @@ async function fetchSpotifyResource(url) {
     },
   });
 
-  console.log("spotify api res", response.status)
-
   if (!response.ok) {
     const body = await safeParseJson(response);
     logger.warn({ status: response.status, body, url }, 'Spotify metadata request failed');
@@ -197,6 +177,103 @@ async function fetchSpotifyResource(url) {
   return response.json();
 }
 
+async function fetchArtistResource(artistId) {
+  const url = `${SPOTIFY_API_BASE}/artists/${artistId}`;
+  return fetchSpotifyResource(url);
+}
+
+async function enrichArtist(artist) {
+  if (!artist?.id) {
+    return {
+      id: artist.id,
+      name: artist.name,
+      type: artist.type,
+      uri: artist.uri,
+      href: artist.href,
+      external_urls: artist.external_urls ?? null,
+      genres: artist.genres ?? [],
+      popularity: artist.popularity ?? null,
+      followers: artist.followers ?? null,
+      images: artist.images ?? [],
+      roles: Array.isArray(artist.roles) ? artist.roles : [],
+    };
+  }
+
+  const hasArtistDetails = Array.isArray(artist.genres) && Array.isArray(artist.images) && typeof artist.popularity === 'number';
+  if (hasArtistDetails) {
+    return {
+      id: artist.id,
+      name: artist.name,
+      type: artist.type,
+      uri: artist.uri,
+      href: artist.href,
+      external_urls: artist.external_urls ?? null,
+      genres: artist.genres ?? [],
+      popularity: artist.popularity ?? null,
+      followers: artist.followers?.total ?? null,
+      images: artist.images ?? [],
+      roles: Array.isArray(artist.roles) ? artist.roles : [],
+    };
+  }
+
+  const details = await fetchArtistResource(artist.id);
+  return {
+    id: details.id,
+    name: details.name,
+    type: details.type,
+    uri: details.uri,
+    href: details.href,
+    external_urls: details.external_urls ?? artist.external_urls ?? null,
+    genres: details.genres ?? [],
+    popularity: details.popularity ?? null,
+    followers: details.followers?.total ?? null,
+    images: details.images ?? [],
+    roles: Array.isArray(artist.roles) ? artist.roles : [],
+  };
+}
+
+async function normalizeTrack(payload) {
+  const artists = await Promise.all(payload.artists.map((artist) => enrichArtist(artist)));
+
+  return {
+    type: payload.type,
+    id: payload.id,
+    uri: payload.uri,
+    href: payload.href,
+    name: payload.name,
+    duration_ms: payload.duration_ms,
+    explicit: payload.explicit,
+    popularity: payload.popularity,
+    track_number: payload.track_number,
+    disc_number: payload.disc_number,
+    preview_url: payload.preview_url,
+    external_urls: payload.external_urls ?? null,
+    external_ids: payload.external_ids ?? null,
+    isrc: payload.external_ids?.isrc ?? null,
+    artists,
+    album: {
+      id: payload.album.id,
+      name: payload.album.name,
+      album_type: payload.album.album_type,
+      total_tracks: payload.album.total_tracks,
+      release_date: payload.album.release_date,
+      release_date_precision: payload.album.release_date_precision,
+      artists: payload.album.artists.map((artist) => ({
+        id: artist.id,
+        name: artist.name,
+        type: artist.type,
+        uri: artist.uri,
+        href: artist.href,
+        external_urls: artist.external_urls ?? null,
+      })),
+      images: payload.album.images,
+      external_urls: payload.album.external_urls ?? null,
+      external_ids: payload.album.external_ids ?? null,
+      copyrights: payload.album.copyrights ?? null,
+    },
+  };
+}
+
 function normalizeResource(type, payload) {
   switch (type) {
     case 'track':
@@ -214,7 +291,7 @@ function normalizeResource(type, payload) {
   }
 }
 
-async function getMetadata(reference) {
+async function getTrackMetadata(reference) {
   const { type, id } = parseSpotifyReference(reference);
   if (!id || !/^[A-Za-z0-9]+$/.test(id)) {
     throw badRequestError('Invalid Spotify resource id', {
@@ -224,7 +301,13 @@ async function getMetadata(reference) {
 
   const endpoint = getSpotifyEndpoint(type, id);
   const payload = await fetchSpotifyResource(endpoint);
-  return normalizeResource(type, payload);
+  return normalizeTrack(payload);
 }
 
-export const spotifyService = { getMetadata, _resetCache: () => { cachedToken = null; } };
+export const spotifyService = {
+  getTrackMetadata,
+  getMetadata: getTrackMetadata,
+  _resetCache: () => {
+    cachedToken = null;
+  },
+};
