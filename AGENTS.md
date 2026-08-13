@@ -180,9 +180,14 @@ These endpoints are mounted on the existing `/registration` router (no `/api/v1`
 else in this app uses one) and sit behind the existing `authenticate` middleware. Originally
 designed for Typebot's own Studio HTTP Request blocks to call directly; as of the backend-driven
 relay (see Conversation Router below), `saveDocument()` is instead called **in-process** from
-`registrationEngine.handleUpload()` for uploads that arrive through `/conversation/upload` — the
-routes below still exist and work standalone (e.g. for `basic-details`/`complete`, still called
-by Typebot's own Studio HTTP blocks), they're just no longer the only caller for documents:
+`registrationEngine.handleUpload()` for uploads that arrive through `/conversation/upload`, and
+`complete()` is called **in-process** from `registrationEngine.handle()` when the Typebot session
+ends. **The live published flow has zero HTTP Request blocks of any kind** (confirmed via the
+builder API, `bot.builder.choira.io/api/v1/typebots/{id}/publishedTypebot`) — Typebot itself never
+calls `basic-details` or `complete`; both are driven entirely in-process by this backend now. The
+routes below still exist and work standalone (e.g. for a non-chat registration path that wants to
+call `basic-details`/`complete` directly), they're just no longer the only, or even the primary,
+caller:
 
 - `POST /registration/start` — returns `{ registrationId }`. **`registrationId` is just the
   stringified `App_Accounts.AccountId`** (already the JWT `sub`) — there is no separate
@@ -273,9 +278,13 @@ scope, leave it. `RegistrationEngine` is a real, backend-driven relay to Typebot
 the existing `/auth/*` endpoints (unchanged); once authenticated, every conversation turn goes
 through this backend, which drives Typebot's `startChat`/`continueChat` on the frontend's behalf.
 This is the reverse of the earlier "Typebot calls us via HTTP Request blocks" model for the
-conversational Q&A itself — but Typebot's own Studio-configured HTTP Request blocks for
-**basic-details** and **complete** (see the Typebot wiring guide) are unaffected and still fire
-from Typebot's own server when those flow groups execute, regardless of how messages reach it.
+conversational Q&A itself — **basic-details and complete are not driven by Typebot at all**: the
+live published flow has no HTTP Request blocks (verified via the builder API), so
+`registrationEngine.handle()` calls `registrationService.complete()` itself when the Typebot
+session ends (`sessionEnded: true`). Because the flow never asks for first/last name, DOB, or
+gender, and its `address` variable is unused, `complete()`'s basic-details gate only requires
+`AccountEmail` (the one field the flow does collect, via `conversationFieldMap.js`) plus the 3
+required documents — see `registration.service.js`'s `complete()`.
 
 - `modules/conversation/services/typebot/typebotClient.js` — `startChat`, `continueChat`,
   `generateUploadUrl`, `uploadToPresignedUrl`. Plain `fetch` + timeout, mirrors
@@ -316,6 +325,19 @@ from Typebot's own server when those flow groups execute, regardless of how mess
     Typebot's Studio no longer needs its own HTTP Request blocks for documents at all.
   - `POST /conversation/upload` is `multipart/form-data` (via `multer`, memory storage, limited by
     `MAX_UPLOAD_SIZE_MB`) — the only multipart endpoint in this app; everything else is JSON.
+  - **OCR-confirmation gate**: for OCR-eligible doc types (PAN/AADHAAR/BANK), `handleUpload()` does
+    *not* advance the conversation immediately after `saveDocument()`. If OCR extracted anything,
+    it stores `{ ..., pendingDocConfirmation: { fileUrl } }` in `typebotSessionStore` and returns a
+    message listing the extracted values (labeled per doc type — `OCR_FIELD_LABELS`, sourced from
+    the real "Document Verification API" contract, not the raw OCR keys) plus a synthetic
+    `choice input` (`"Yes, confirm"` / `"No, re-upload"` — not a real Typebot block, Studio needs no
+    changes). `handle()` checks `pendingDocConfirmation` before anything else: an affirmative answer
+    replays the original upload's `attachedFileUrls` through the normal relay path (exactly what
+    would have happened pre-gate); anything else re-asks the same file-input step. If OCR found
+    nothing at all (`extracted` present but `null` — e.g. an unreadable image), the user is told to
+    re-upload a clearer image instead, no confirmation choice shown. This exists because OCR's own
+    `isValid` flag doesn't catch every misread (a real Union Bank passbook once extracted as "The
+    Federal Bank" with `isValid: true`) — a human check catches what automated verification misses.
 
 ## Spotify Credit Verification
 
