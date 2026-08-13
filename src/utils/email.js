@@ -1,0 +1,53 @@
+import nodemailer from 'nodemailer';
+import { env } from '../config/env.js';
+import { logger } from './logger.js';
+import { appError } from '../shared/errors.js';
+
+let transport;
+
+function getTransport() {
+  if (transport) return transport;
+
+  const opts = createSmtpOptions();
+
+  console.log('SMTP options:', opts); // Log SMTP options for debugging
+  transport = nodemailer.createTransport(opts);
+
+  // Verify connection configuration lazily (don't throw at import time)
+  transport.verify((err, success) => {
+    if (err) {
+      logger.warn({ err: err.message, opts }, 'SMTP verify failed');
+    } else {
+      logger.debug('SMTP transporter verified');
+    }
+  });
+
+  return transport;
+}
+
+export async function sendEmail({ to, subject, text, html, from }) {
+  const t = getTransport();
+  try {
+    const info = await t.sendMail({ from: from ?? env.SMTP_USER, to, subject, text, html });
+    logger.debug({ to, subject, msgId: info.messageId }, 'Email sent');
+    return info;
+  } catch (err) {
+    // Log safe details; include stack in dev only
+    logger.error({ err: err.message, to }, 'Failed to send email');
+    const details = { message: err.message };
+    if (!env.isProd) details.stack = err.stack;
+    throw appError('Failed to send email', { details });
+  }
+}
+
+export function createSmtpOptions() {
+  return {
+    host: env.SMTP_HOST,
+    port: Number(env.SMTP_PORT),
+    secure: !Boolean(env.SMTP_SECURE),
+    auth: env.SMTP_USER && env.SMTP_PASSWORD ? { user: env.SMTP_USER, pass: env.SMTP_PASSWORD } : undefined,
+    requireTLS: !Boolean(env.SMTP_SECURE),
+    tls: { rejectUnauthorized: env.isProd },
+    connectionTimeout: 10_000,
+  };
+}

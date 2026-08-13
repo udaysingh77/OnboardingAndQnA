@@ -167,6 +167,28 @@ CREATE TABLE [dbo].[App_Accounts_Doc](
 )WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
 ) ON [PRIMARY]
 GO
+/
+****** Object:  Table [dbo].[Email_Verification_Otp]    Script Date: 06-08-2026 13:10:00 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE TABLE [dbo].[Email_Verification_Otp](
+	[id] [bigint] IDENTITY(1,1) NOT NULL,
+	[email] [nvarchar](256) NOT NULL,
+	[otpHash] [nvarchar](256) NOT NULL,
+	[expiresAt] [datetime2] NOT NULL,
+	[attempts] [int] NOT NULL DEFAULT ((0)),
+	[verifiedAt] [datetime2] NULL,
+	[createdAt] [datetime2] NOT NULL DEFAULT (GETDATE()),
+	[updatedAt] [datetime2] NOT NULL DEFAULT (GETDATE())
+ CONSTRAINT [PK_Email_Verification_Otp] PRIMARY KEY CLUSTERED 
+(
+	[id] ASC
+)
+) ON [PRIMARY]
+GO
+
 /****** Object:  Table [dbo].[App_Accounts_Temp]    Script Date: 06-08-2026 12:59:33 ******/
 SET ANSI_NULLS ON
 GO
