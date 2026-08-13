@@ -13,6 +13,7 @@
 // ==================================================================
 import { appError } from '../../../../shared/errors.js';
 import { env } from '../../../../config/env.js';
+import { logger } from '../../../../utils/logger.js';
 
 function requireTypebotId() {
   if (!env.TYPEBOT_ID) {
@@ -41,6 +42,7 @@ async function callTypebot(path, body) {
   }
 
   const responseBody = await response.json().catch(() => null);
+  logger.debug({ path, body, status: response.status, responseBody }, 'DEBUG typebot call');
 
   if (!response.ok) {
     throw appError(responseBody?.message ?? `Typebot request failed with status ${response.status}`, {
@@ -96,6 +98,12 @@ async function uploadToPresignedUrl({ presignedUrl, formData, fileBuffer, fileNa
   } catch (cause) {
     throw appError('File upload to storage failed', { errorCode: 'TYPEBOT_UPLOAD_FAILED', cause });
   }
+
+  const responseText = await response.text().catch(() => '');
+  logger.debug(
+    { presignedUrl, formDataKeys: formData ? Object.keys(formData) : [], status: response.status, responseText },
+    'DEBUG typebot storage upload'
+  );
 
   if (!response.ok) {
     throw appError(`File upload failed with status ${response.status}`, {

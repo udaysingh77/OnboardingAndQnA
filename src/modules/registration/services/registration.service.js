@@ -25,6 +25,10 @@ const OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR, DOC_TYPES.BANK];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
+// Fields conversationFieldMap.js is allowed to write to - keeps an arbitrary
+// mapped column name from being trusted blindly, even though the map only
+// ever contains these three today.
+const CONVERSATION_FIELDS = ['GSTNo', 'AccountAlias', 'AccountEmail'];
 
 const ocrProvider = createOcrProvider();
 
@@ -111,6 +115,18 @@ async function saveDocument(userId, registrationId, docType, documentUrl) {
   });
 
   return toDocumentPublic(doc, ocrResult);
+}
+
+// Persists a single text/choice conversation answer (GST number, alias/stage
+// name, email) onto its mapped AppAccounts column - see conversationFieldMap.js.
+async function saveConversationField(userId, registrationId, field, value) {
+  assertOwnRegistration(userId, registrationId);
+  if (!CONVERSATION_FIELDS.includes(field)) return;
+
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return;
+
+  await registrationRepository.update(registrationId, { [field]: trimmed });
 }
 
 // A failed OCR extraction never fails the upload - the document still saves,
@@ -211,6 +227,7 @@ export const registrationService = {
   start,
   saveBasicDetails,
   saveDocument,
+  saveConversationField,
   complete,
   DOC_TYPES,
 };

@@ -208,12 +208,16 @@ by Typebot's own Studio HTTP blocks), they're just no longer the only caller for
   `details.missing` list. Otherwise reuses the existing `markCompleted`/`toPublic`
   (`ApplicationStatus = 1`) already used by `GET/PUT /status`.
 
-**Fields intentionally not persisted**: the actual Typebot flow also asks about GST number, role
-(lyricist/composer), stage name/alias, membership in another society, tax residency, and a
-Spotify link. None of these map to a documented `AppAccounts` column — the only unused-looking
-slots are the generic `Detail1`…`Detail12` free-text columns, but that's shared production data
-(`Dreamsoft_UAT`) whose usage elsewhere is unverified, so nothing guesses a mapping. These answers
-live only in Typebot's own result store, not in this DB, until a real column/mapping is confirmed.
+**Fields intentionally not persisted**: the actual Typebot flow also asks about role
+(lyricist/composer), membership in another society, tax residency, and a Spotify link. None of
+these map to a documented `AppAccounts` column — the only unused-looking slots are the generic
+`Detail1`…`Detail12` free-text columns, but that's shared production data (`Dreamsoft_UAT`) whose
+usage elsewhere is unverified, so nothing guesses a mapping. These answers live only in Typebot's
+own result store, not in this DB, until a real column/mapping is confirmed.
+
+**GST number, stage name/alias, and email** *are* persisted (via `conversationFieldMap.js` +
+`registrationService.saveConversationField()`, see "Conversation Router" below) — `GSTNo` (new
+column, added the same way `PANNo` was) and the existing `AccountAlias`/`AccountEmail` columns.
 
 **Auth model**: Typebot runs the existing `/auth/send-otp` + `/auth/verify-otp` first (no new
 token mechanism), stores `token` + `registrationId` as variables, and sends
@@ -237,13 +241,13 @@ Env: `OCR_PROVIDER`, `OCR_API_BASE_URL` (default `https://ocr.choira.io`),
 `OCR_REQUEST_TIMEOUT_MS`.
 
 What gets persisted to `AppAccounts` from a successful OCR result, and what doesn't:
-- **PAN**: the extracted number is written to `AppAccounts.PANNo` (`NVarChar(10)`) — the one
-  schema change made for this feature. No other PAN-shaped column existed: the only `PanNo` field
+- **PAN**: the extracted number is written to `AppAccounts.PANNo` (`NVarChar(10)`) — added via
+  `db push` for this feature. No other PAN-shaped column existed: the only `PanNo` field
   anywhere in the schema is on `AppAccountsTemp`, which is `@@ignore`'d by Prisma (no usable
   primary key) and isn't the table this app writes to.
 - **Aadhaar**: extracted number/name/dob/gender/address are used only to compute `verified` —
-  never written to `AppAccounts`. Same reasoning as the GST/role/etc. fields above: no safe
-  existing column, and this one wasn't worth a schema change.
+  never written to `AppAccounts`. Same reasoning as the role/tax-residency/etc. fields above: no
+  safe existing column, and this one wasn't worth a schema change.
 - **Bank**: `bankName`/`accountNumber`/`ifsc`/`branch`/`micr` map onto the existing
   `BankName`/`BankAcNo`/`BankIFSCCode`/`BankBranchName`/`MicrCode` columns and get auto-filled on
   success (only fields OCR actually returned — never overwritten with `null`). The bank OCR
@@ -253,9 +257,9 @@ What gets persisted to `AppAccounts` from a successful OCR result, and what does
 The document upload response includes `verified` (boolean) and `extracted` (raw OCR data) when
 OCR was attempted for that doc type; both are absent for NOC/COMPANY_DOC/PROFILE_PHOTO.
 
-Schema note: this is the first change to `prisma/schema.prisma` since the initial `db pull` import.
-Applied via `npx prisma db push` (not `migrate dev` — the `iprs_app` DB user lacks the
-`CREATE DATABASE` permission `migrate dev`'s shadow database needs), so there is still no
+Schema note: `PANNo` and `GSTNo` are the only changes to `prisma/schema.prisma` since the initial
+`db pull` import, both applied via `npx prisma db push` (not `migrate dev` — the `iprs_app` DB user
+lacks the `CREATE DATABASE` permission `migrate dev`'s shadow database needs), so there is still no
 `prisma/migrations/` folder; the live schema and `schema.prisma` are kept in sync directly.
 
 ## Conversation Router
@@ -288,11 +292,22 @@ from Typebot's own server when those flow groups execute, regardless of how mess
 - `modules/conversation/services/typebot/documentTypeMap.js` — maps a file-input block's
   `variableId` to one of our document types (`PAN`/`AADHAAR`/`BANK`/...). Update this whenever a
   file-input block's variable is added/renamed in the Typebot flow.
+- `modules/conversation/services/typebot/conversationFieldMap.js` — same pattern as
+  `documentTypeMap.js` but for plain text/choice answers: maps a block's `variableId` to an
+  `AppAccounts` column. Currently maps GST no, alias/stage name, and email — confirmed live and
+  verified end-to-end via `sqlcmd` (alias/email; GST's `variableId` was filled in after its Studio
+  block got a variable assigned, not yet re-verified against the DB). Persisted via
+  `registrationService.saveConversationField()`, which whitelists the field name against a
+  hardcoded `CONVERSATION_FIELDS` list rather than trusting the map blindly.
 - `modules/conversation/engines/registrationEngine.js`:
   - `handle({ userId, token, message, attachedFileUrls })` — no existing session → `startChat`
     with `prefilledVariables: { token, registrationId: userId }`; existing session →
-    `continueChat`. Response shape stays close to Typebot's own (`messages`/`input`/`progress`) —
-    no invented transformation, since the frontend's exact expectations weren't specified.
+    `continueChat`. Before overwriting the session, it checks whether the *previous* turn's input
+    (`existing.input`, i.e. the question `message` is answering) maps to a known field via
+    `conversationFieldMap.js`, and persists it if so — a failure here is logged and swallowed, it
+    never breaks the conversation relay itself. Response shape stays close to Typebot's own
+    (`messages`/`input`/`progress`) — no invented transformation, since the frontend's exact
+    expectations weren't specified.
   - `handleUpload({ userId, token, file })` — gets a presigned URL from Typebot for the *current*
     file-input step, uploads the buffer, and — this is the key simplification versus the original
     wiring guide — **saves the document itself** by calling the existing

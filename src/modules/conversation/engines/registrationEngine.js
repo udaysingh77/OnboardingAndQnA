@@ -9,10 +9,12 @@
 // aren't specified; adjust here if it needs a different shape.
 // ==================================================================
 import { badRequestError } from '../../../shared/errors.js';
+import { logger } from '../../../utils/logger.js';
 import { registrationService } from '../../registration/services/registration.service.js';
 import { typebotClient } from '../services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
+import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
 
 /**
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
@@ -28,6 +30,19 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     : await typebotClient.startChat({
         prefilledVariables: { token, registrationId: userId },
       });
+
+  // `message` answers the question the user was just asked (existing.input),
+  // not the new one in `response.input` - persist it before overwriting the session.
+  if (existing?.input && message) {
+    const field = resolveConversationField(existing.input.options?.variableId);
+    if (field) {
+      try {
+        await registrationService.saveConversationField(userId, userId, field, message);
+      } catch (err) {
+        logger.warn({ userId, field, err }, 'Failed to persist conversation answer, continuing relay');
+      }
+    }
+  }
 
   // continueChat's response doesn't repeat sessionId - keep the one we already have.
   const sessionId = existing ? existing.sessionId : response.sessionId;
