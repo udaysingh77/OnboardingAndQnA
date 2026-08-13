@@ -15,6 +15,7 @@ import userRoutes from './modules/user/routes/user.routes.js';
 import registrationRoutes from './modules/registration/routes/registration.routes.js';
 import conversationRoutes from './modules/conversation/routes/conversation.routes.js';
 import healthRoutes from './modules/health/routes/health.routes.js';
+import spotifyRoutes from './modules/spotify/routes/spotify.routes.js';
 
 export const app = express();
 
@@ -39,6 +40,7 @@ app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 app.use('/registration', registrationRoutes);
 app.use('/conversation', conversationRoutes);
+app.use('/spotify', spotifyRoutes);
 
 // --- 404 + central error handling (LAST) ---
 app.use(notFoundHandler);

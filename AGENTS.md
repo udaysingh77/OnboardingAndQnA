@@ -317,6 +317,37 @@ from Typebot's own server when those flow groups execute, regardless of how mess
   - `POST /conversation/upload` is `multipart/form-data` (via `multer`, memory storage, limited by
     `MAX_UPLOAD_SIZE_MB`) — the only multipart endpoint in this app; everything else is JSON.
 
+## Spotify Credit Verification
+
+`POST /spotify/metadata` (`modules/spotify/`, behind `authenticate`) — given `{ url, actualName,
+stageName }`, fetches the track's metadata from the real Spotify Web API (client-credentials OAuth,
+token cached in-memory) and checks whether `actualName` or `stageName` matches one of the track's
+credited artists (diacritics/punctuation/case-insensitive match via `normalizeName()`). Every call
+also writes an `App_Accounts_WorkRegistration` row (song/album/artists/release-year) regardless of
+match outcome — this is an existing table from the original DB dump, not a new one.
+`SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` are optional in `envSchema` (feature no-ops with a clear
+`SPOTIFY_CREDENTIALS_MISSING` 500 if unset, same graceful-missing-config pattern as `TYPEBOT_ID`).
+
+**Wired into the conversation flow as a hard gate** — `modules/conversation/services/spotifyGate.js`
+recognizes the "Enter your spotify link" url-input block by its `variableId`
+(`SPOTIFY_URL_VARIABLE_ID`, same hardcoded-until-Studio-changes precedent as
+`conversationFieldMap.js`/`documentTypeMap.js`). `registrationEngine.js`'s `handle()` intercepts an
+answer to that step *before* relaying anything to Typebot: it calls `verifySpotifyClaim()`, which
+checks the claimed track's artist credits against the account's `AccountName` *or* `AccountAlias`
+(`registrationService.getIdentityNames()`). If neither matches (or the URL/Spotify call fails for
+any reason - treated the same as a non-match, never crashes the turn), the answer is **never sent to
+Typebot's `continueChat`** - the session stays exactly where it was, and a rejection message asking
+for another link is returned directly. Only a genuine match lets the turn fall through to the normal
+relay path, advancing the conversation as usual. `actualName` for this check is `AccountName`
+(`FirstName`+`LastName` from the `basic-details` step), not the Aadhaar-OCR name (still intentionally
+unpersisted, see above).
+
+`SPOTIFY_VERIFICATION_BYPASS` (default `false`) — dev-only escape hatch for `verifySpotifyClaim()`:
+when `true`, skips the real Spotify API call/match check entirely and always returns verified (logs
+a `logger.warn` each time so a bypass is never silently active). Same purpose as `OTP_PROVIDER=mock`/
+`OCR_PROVIDER=stub` — lets the rest of the conversation flow be tested without owning a real Spotify
+track credited to the exact test account name. **Never leave `true` in a shared/prod `.env`.**
+
 ## Conventions to preserve
 
 - Keep the response envelope, error codes, and status codes consistent — do not introduce ad-hoc shapes.

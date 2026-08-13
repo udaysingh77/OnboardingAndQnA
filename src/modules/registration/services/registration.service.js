@@ -32,6 +32,14 @@ const CONVERSATION_FIELDS = ['GSTNo', 'AccountAlias', 'AccountEmail'];
 
 const ocrProvider = createOcrProvider();
 
+// Used by the Spotify-claim gate (conversation module) to know which names
+// to check a track's artist credits against.
+async function getIdentityNames(userId) {
+  const account = await registrationRepository.findByAccountId(userId);
+  if (!account) throw notFoundError('User not found');
+  return { accountName: account.AccountName, accountAlias: account.AccountAlias };
+}
+
 async function getStatus(userId) {
   const account = await registrationRepository.findByAccountId(userId);
   if (!account) throw notFoundError('User not found');
@@ -222,6 +230,7 @@ function toPublic(account) {
 }
 
 export const registrationService = {
+  getIdentityNames,
   getStatus,
   updateStep,
   start,

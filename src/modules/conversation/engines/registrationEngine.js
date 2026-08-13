@@ -15,12 +15,54 @@ import { typebotClient } from '../services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
 import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
+import { isSpotifyUrlStep, verifySpotifyClaim } from '../services/spotifyGate.js';
 
 /**
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
 export async function handle({ userId, token, message, attachedFileUrls }) {
   const existing = typebotSessionStore.get(userId);
+
+  // The Spotify-link step is gated: the conversation only advances past it
+  // once the claimed track's credits actually match the account's name or
+  // alias. A failed/invalid attempt never reaches Typebot's continueChat -
+  // the session stays exactly where it was, and the same question is
+  // re-asked, so the user can try another link.
+  if (existing?.input && message && isSpotifyUrlStep(existing.input.options?.variableId)) {
+    let verified = false;
+    try {
+      verified = await verifySpotifyClaim(userId, message);
+    } catch (err) {
+      logger.warn({ userId, err }, 'Spotify claim verification failed, blocking progression');
+    }
+
+    if (!verified) {
+      return {
+        sessionEnded: false,
+        messages: [
+          {
+            id: 'spotify-verification-failed',
+            type: 'text',
+            content: {
+              type: 'richText',
+              richText: [
+                {
+                  type: 'p',
+                  children: [
+                    {
+                      text: 'Invalid Spotify link - the credited artist name does not match your registered name or stage name. Please enter another Spotify link.',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        input: existing.input,
+        progress: null,
+      };
+    }
+  }
 
   // Typebot's own widget puts the file URL(s) in `text` too (not just
   // attachedFileUrls) when answering a file-input step - an empty text
