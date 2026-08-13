@@ -31,6 +31,13 @@ const envSchema = z.object({
 
   SPOTIFY_CLIENT_ID: z.string().optional(),
   SPOTIFY_CLIENT_SECRET: z.string().optional(),
+  // Dev-only: skips the real Spotify match check in the conversation gate, always lets the
+  // spotify-link step advance. z.coerce.boolean() would treat "false" as truthy - same fix as
+  // TYPEBOT_PREVIEW_MODE below.
+  SPOTIFY_VERIFICATION_BYPASS: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
 
   DEFAULT_REGISTRATION_STATUS: z.string().default('started'),
   REGISTRATION_TOTAL_STEPS: z.coerce.number().int().positive().default(10),

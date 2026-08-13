@@ -40,7 +40,7 @@ app.use('/auth', authRoutes);
 app.use('/users', userRoutes);
 app.use('/registration', registrationRoutes);
 app.use('/conversation', conversationRoutes);
-app.use('/api/spotify', spotifyRoutes);
+app.use('/spotify', spotifyRoutes);
 
 // --- 404 + central error handling (LAST) ---
 app.use(notFoundHandler);
