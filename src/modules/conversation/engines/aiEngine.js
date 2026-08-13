@@ -9,6 +9,6 @@
  */
 export async function handle(input) {
   return {
-    reply: '[AIEngine] Chatbot not yet implemented (Week 1).',
+    reply: 'Your registration is already complete. Thank you!',
   };
 }

@@ -172,10 +172,15 @@ async function complete(userId, registrationId) {
   const account = await registrationRepository.findByAccountId(registrationId);
   if (!account) throw notFoundError('Registration not found');
 
+  // Only AccountEmail is actually collected by the live Typebot chat flow (via
+  // conversationFieldMap.js's unconditional "Provide your email id" question) -
+  // the flow has no blocks and no HTTP Request callbacks for first/last name,
+  // DOB, gender, or address, so requiring them here would make chat-driven
+  // completion permanently impossible. FirstName/LastName/DOB/Gender/
+  // AccountAddress can still be filled via PATCH .../basic-details for other
+  // (non-chat) registration paths, but aren't required to complete.
   const missing = [];
-  const basicDetailsComplete =
-    account.FirstName && account.LastName && account.AccountEmail && account.DOB && account.Gender && account.AccountAddress;
-  if (!basicDetailsComplete) missing.push('basic-details');
+  if (!account.AccountEmail) missing.push('basic-details');
 
   const docs = await registrationRepository.findDocumentsByAccountId(registrationId);
   const uploadedTypes = new Set(docs.map((doc) => doc.DocumentCaption));
