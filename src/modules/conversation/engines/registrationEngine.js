@@ -22,10 +22,16 @@ import { resolveConversationField } from '../services/typebot/conversationFieldM
 export async function handle({ userId, token, message, attachedFileUrls }) {
   const existing = typebotSessionStore.get(userId);
 
+  // Typebot's own widget puts the file URL(s) in `text` too (not just
+  // attachedFileUrls) when answering a file-input step - an empty text
+  // answers gets rejected as "Invalid message" even though the docs say
+  // text may be empty. Mirror the widget's behavior exactly.
+  const text = message ?? (attachedFileUrls?.length ? attachedFileUrls.join(', ') : '');
+
   const response = existing
     ? await typebotClient.continueChat({
         sessionId: existing.sessionId,
-        message: { type: 'text', text: message ?? '', attachedFileUrls },
+        message: { type: 'text', text, attachedFileUrls },
       })
     : await typebotClient.startChat({
         prefilledVariables: { token, registrationId: userId },
@@ -100,5 +106,5 @@ export async function handleUpload({ userId, token, file }) {
     await registrationService.saveDocument(userId, userId, docType, fileUrl);
   }
 
-  return handle({ userId, token, message: '', attachedFileUrls: [fileUrl] });
+  return handle({ userId, token, attachedFileUrls: [fileUrl] });
 }
