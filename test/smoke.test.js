@@ -122,6 +122,14 @@ test('auth round-trip: send-otp -> verify-otp -> protected endpoint', async (t) 
     headers: { authorization: `Bearer ${verifiedBody.data.token}` },
   });
   assert.equal(logout.status, 200);
+
+  // The token must actually stop working after logout - not just return 200 on the logout call.
+  const afterLogout = await fetch(`${baseUrl}/registration/status`, {
+    headers: { authorization: `Bearer ${verifiedBody.data.token}` },
+  });
+  assert.equal(afterLogout.status, 401);
+  const afterLogoutBody = await afterLogout.json();
+  assert.equal(afterLogoutBody.error.code, 'UNAUTHORIZED');
 });
 
 test('Typebot registration flow: start -> basic-details -> documents -> complete', async (t) => {
