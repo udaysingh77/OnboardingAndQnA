@@ -62,6 +62,7 @@ test('POST /api/spotify/metadata returns normalized track metadata', async () =>
         album: {
           id: 'album1',
           name: 'Example Album',
+          artists: [{ id: 'artist1', name: 'Artist Name', external_urls: { spotify: 'https://open.spotify.com/artist/artist1' } }],
           images: [{ url: 'https://example.com/image.jpg' }],
           external_urls: { spotify: 'https://open.spotify.com/album/album1' },
         },
@@ -101,7 +102,7 @@ test('POST /api/spotify/metadata returns normalized track metadata', async () =>
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012', actualName: 'Artist Name', stageName: 'Stage Name' }),
   });
   const body = await res.json();
 
@@ -140,6 +141,7 @@ test('POST /api/spotify/metadata matches stage name claim exactly', async () => 
         album: {
           id: 'album1',
           name: 'Claimed Album',
+          artists: [{ id: 'artist1', name: 'Sachin', external_urls: { spotify: 'https://open.spotify.com/artist/artist1' } }],
           images: [{ url: 'https://example.com/image.jpg' }],
           external_urls: { spotify: 'https://open.spotify.com/album/album1' },
         },
@@ -179,7 +181,7 @@ test('POST /api/spotify/metadata matches stage name claim exactly', async () => 
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012', actualName: 'NoMatch', stageName: 'Sachin' }),
   });
   const body = await res.json();
 
@@ -203,7 +205,33 @@ test('missing body.url returns 422 validation error', async () => {
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ actualName: 'A', stageName: 'B' }),
+  });
+  const body = await res.json();
+
+  assert.equal(res.status, 422);
+  assert.equal(body.success, false);
+  assert.equal(body.error.code, 'VALIDATION_ERROR');
+});
+
+test('missing actualName returns 422 validation error', async () => {
+  const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012', stageName: 'B' }),
+  });
+  const body = await res.json();
+
+  assert.equal(res.status, 422);
+  assert.equal(body.success, false);
+  assert.equal(body.error.code, 'VALIDATION_ERROR');
+});
+
+test('missing stageName returns 422 validation error', async () => {
+  const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012', actualName: 'A' }),
   });
   const body = await res.json();
 
@@ -216,7 +244,7 @@ test('invalid Spotify URL returns 422 validation error', async () => {
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/album/album123' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/album/album123', actualName: 'A', stageName: 'B' }),
   });
   const body = await res.json();
 
@@ -243,6 +271,7 @@ test('Spotify createWorkRegistration failure returns 500', async () => {
         album: {
           id: 'album1',
           name: 'Example Album',
+          artists: [{ id: 'artist1', name: 'Artist Name', external_urls: { spotify: 'https://open.spotify.com/artist/artist1' } }],
           images: [{ url: 'https://example.com/image.jpg' }],
         },
         duration_ms: 180000,
@@ -264,7 +293,7 @@ test('Spotify createWorkRegistration failure returns 500', async () => {
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/track/track123' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/track123', actualName: 'Artist Name', stageName: 'Stage Name' }),
   });
   const body = await res.json();
 
@@ -293,6 +322,7 @@ test('POST /api/spotify/metadata maps release year from album.release_date', asy
         album: {
           id: 'album1',
           name: 'Year Album',
+          artists: [{ id: 'artist1', name: 'Year Artist', external_urls: { spotify: 'https://open.spotify.com/artist/artist1' } }],
           release_date: '2014-01-01',
           images: [{ url: 'https://example.com/image.jpg' }],
           external_urls: { spotify: 'https://open.spotify.com/album/album1' },
@@ -333,7 +363,7 @@ test('POST /api/spotify/metadata maps release year from album.release_date', asy
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/1234567890123456789012', actualName: 'Year Artist', stageName: 'Year Stage' }),
   });
   const body = await res.json();
   spotifyRepository.createWorkRegistration = createSpy;
@@ -355,7 +385,7 @@ test('Spotify authentication failure returns 401', async () => {
   const res = await fetch(`${baseUrl}/api/spotify/metadata`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ url: 'https://open.spotify.com/track/track123' }),
+    body: JSON.stringify({ url: 'https://open.spotify.com/track/track123', actualName: 'A', stageName: 'B' }),
   });
   const body = await res.json();
 

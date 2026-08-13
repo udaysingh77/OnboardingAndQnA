@@ -10,5 +10,7 @@ export const spotifyMetadataBodySchema = z.object({
       .refine((value) => spotifyTrackUrlPattern.test(value), {
         message: 'Invalid Spotify track URL or URI',
       }),
+    actualName: z.string().min(1, 'actualName is required'),
+    stageName: z.string().min(1, 'stageName is required'),
   }),
 });

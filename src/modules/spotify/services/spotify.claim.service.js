@@ -2,8 +2,7 @@ import { badRequestError, appError } from '../../../shared/errors.js';
 import { spotifyService } from './spotify.service.js';
 import { spotifyRepository } from '../repositories/spotify.repository.js';
 
-const USER_ACTUAL_NAME = 'Shreya Ghoshal';
-const USER_STAGE_NAME = 'Badsahaa';
+// `actualName` and `stageName` are provided by the request payload; no hardcoded defaults.
 
 function safeString(value) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
@@ -92,7 +91,7 @@ function buildMatchResult(matchedArtists, matchedAgainst) {
   };
 }
 
-export async function matchSpotifyClaim(reference, user) {
+export async function matchSpotifyClaim(reference, user, actualName, stageName) {
   if (!reference || typeof reference !== 'string') {
     throw badRequestError('Spotify track URL is required', { errorCode: 'MISSING_SPOTIFY_URL' });
   }
@@ -104,8 +103,8 @@ export async function matchSpotifyClaim(reference, user) {
     });
   }
 
-  const normalizedActualName = normalizeName(USER_ACTUAL_NAME);
-  const normalizedStageName = normalizeName(USER_STAGE_NAME);
+  const normalizedActualName = normalizeName(actualName);
+  const normalizedStageName = normalizeName(stageName);
 
   const actualMatches = getMatchedArtists(track.artists, normalizedActualName);
   const stageMatches = getMatchedArtists(track.artists, normalizedStageName);
