@@ -5,6 +5,8 @@ import { z } from 'zod';
 
 export const sendMessageSchema = z.object({
   body: z.object({
-    message: z.string().trim().min(1, 'message must not be empty').max(4000),
+    // Optional: the very first call (starting a Typebot session) needs no answer yet.
+    message: z.string().trim().max(4000).optional(),
+    attachedFileUrls: z.array(z.string().url()).optional(),
   }),
 });
