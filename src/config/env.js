@@ -29,6 +29,9 @@ const envSchema = z.object({
   MSG91_OTP_LENGTH: z.coerce.number().int().positive().default(4),
   MSG91_OTP_EXPIRY: z.coerce.number().int().positive().default(10),
 
+  SPOTIFY_CLIENT_ID: z.string().optional(),
+  SPOTIFY_CLIENT_SECRET: z.string().optional(),
+
   DEFAULT_REGISTRATION_STATUS: z.string().default('started'),
   REGISTRATION_TOTAL_STEPS: z.coerce.number().int().positive().default(10),
 
