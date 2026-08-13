@@ -1,5 +1,5 @@
 ﻿// ==================================================================
-// Smoke tests - health + auth round-trip (node:test).
+// Smoke tests - health, auth round-trip, Typebot registration flow (node:test).
 // DB-dependent tests are skipped automatically when SQL Server is unreachable.
 // Run: npm test
 // ==================================================================
@@ -94,6 +94,11 @@ test('auth round-trip: send-otp -> verify-otp -> protected endpoint', async (t) 
   const regBody = await reg.json();
   assert.equal(regBody.data.completed, false);
 
+  // The registration engine now relays to a real Typebot bot via TYPEBOT_ID (preview mode or,
+  // once published, TYPEBOT_PREVIEW_MODE=false with the real publicId). If neither is configured
+  // the engine should fail gracefully (503 TYPEBOT_NOT_CONFIGURED) rather than crash - that's
+  // what's asserted here until a real TYPEBOT_ID is set, at which point this should assert a
+  // 200 with `engine: 'REGISTRATION'` instead.
   const conversation = await fetch(`${baseUrl}/conversation/message`, {
     method: 'POST',
     headers: {
@@ -102,13 +107,160 @@ test('auth round-trip: send-otp -> verify-otp -> protected endpoint', async (t) 
     },
     body: JSON.stringify({ message: 'hello' }),
   });
-  assert.equal(conversation.status, 200);
-  const convBody = await conversation.json();
-  assert.equal(convBody.data.engine, 'REGISTRATION');
+  if (process.env.TYPEBOT_ID) {
+    assert.equal(conversation.status, 200);
+    const convBody = await conversation.json();
+    assert.equal(convBody.data.engine, 'REGISTRATION');
+  } else {
+    assert.equal(conversation.status, 503);
+    const convBody = await conversation.json();
+    assert.equal(convBody.error.code, 'TYPEBOT_NOT_CONFIGURED');
+  }
 
   const logout = await fetch(`${baseUrl}/auth/logout`, {
     method: 'POST',
     headers: { authorization: `Bearer ${verifiedBody.data.token}` },
   });
   assert.equal(logout.status, 200);
+
+  // The token must actually stop working after logout - not just return 200 on the logout call.
+  const afterLogout = await fetch(`${baseUrl}/registration/status`, {
+    headers: { authorization: `Bearer ${verifiedBody.data.token}` },
+  });
+  assert.equal(afterLogout.status, 401);
+  const afterLogoutBody = await afterLogout.json();
+  assert.equal(afterLogoutBody.error.code, 'UNAUTHORIZED');
+});
+
+test('Typebot registration flow: start -> basic-details -> documents -> complete', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  if ((process.env.OTP_PROVIDER ?? 'mock') !== 'mock') {
+    return t.skip('Registration flow only works with the mock OTP provider');
+  }
+
+  const phone = `+1555${Date.now().toString().slice(-7)}`;
+
+  const sent = await fetch(`${baseUrl}/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ phone }),
+  });
+  const sentBody = await sent.json();
+
+  const verified = await fetch(`${baseUrl}/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ phone, otp: sentBody.data.otp }),
+  });
+  const verifiedBody = await verified.json();
+  const token = verifiedBody.data.token;
+  const authHeaders = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+  // start
+  const start = await fetch(`${baseUrl}/registration/start`, { method: 'POST', headers: authHeaders });
+  assert.equal(start.status, 200);
+  const startBody = await start.json();
+  const registrationId = startBody.data.registrationId;
+  assert.equal(registrationId, verifiedBody.data.user.id);
+
+  // unauthorized (no token)
+  const noAuth = await fetch(`${baseUrl}/registration/${registrationId}/documents/PAN`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ documentUrl: 'https://s3.example.com/pan.jpg' }),
+  });
+  assert.equal(noAuth.status, 401);
+
+  // mismatched registrationId is rejected (ownership check), regardless of DB state
+  const foreignId = String(BigInt(registrationId) + 1n);
+  const forbidden = await fetch(`${baseUrl}/registration/${foreignId}/basic-details`, {
+    method: 'PATCH',
+    headers: authHeaders,
+    body: JSON.stringify({
+      firstName: 'Uday',
+      lastName: 'Singh',
+      email: `uday${Date.now()}@example.com`,
+      dob: '1998-05-10',
+      gender: 'Male',
+      address: 'Mumbai',
+    }),
+  });
+  assert.equal(forbidden.status, 403);
+
+  // invalid basic details (missing required fields)
+  const invalidBasic = await fetch(`${baseUrl}/registration/${registrationId}/basic-details`, {
+    method: 'PATCH',
+    headers: authHeaders,
+    body: JSON.stringify({ firstName: 'Uday' }),
+  });
+  assert.equal(invalidBasic.status, 422);
+  const invalidBasicBody = await invalidBasic.json();
+  assert.equal(invalidBasicBody.error.code, 'VALIDATION_ERROR');
+
+  // complete before sections are done -> incomplete
+  const incomplete = await fetch(`${baseUrl}/registration/${registrationId}/complete`, {
+    method: 'POST',
+    headers: authHeaders,
+  });
+  assert.equal(incomplete.status, 400);
+  const incompleteBody = await incomplete.json();
+  assert.equal(incompleteBody.error.code, 'REGISTRATION_INCOMPLETE');
+
+  // valid basic details
+  const basicDetails = await fetch(`${baseUrl}/registration/${registrationId}/basic-details`, {
+    method: 'PATCH',
+    headers: authHeaders,
+    body: JSON.stringify({
+      firstName: 'Uday',
+      lastName: 'Singh',
+      email: `uday${Date.now()}@example.com`,
+      dob: '1998-05-10',
+      gender: 'Male',
+      address: 'Mumbai',
+    }),
+  });
+  assert.equal(basicDetails.status, 200);
+  const basicDetailsBody = await basicDetails.json();
+  assert.equal(basicDetailsBody.data.firstName, 'Uday');
+
+  // documents - covers the original required 3 (OCR-eligible) plus one generalized extra type (not).
+  // The fake s3.example.com URLs can't be OCR'd for real, so PAN/AADHAAR/BANK are expected to come
+  // back unverified rather than fail the upload - that graceful-degradation path is the point here.
+  const OCR_TYPES = new Set(['PAN', 'AADHAAR', 'BANK']);
+  for (const type of ['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO']) {
+    const res = await fetch(`${baseUrl}/registration/${registrationId}/documents/${type}`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ documentUrl: `https://s3.example.com/${type.toLowerCase()}.jpg` }),
+    });
+    assert.equal(res.status, 200, `${type} upload should succeed`);
+    const body = await res.json();
+    assert.equal(body.data.documentType, type);
+    if (OCR_TYPES.has(type)) {
+      assert.equal(body.data.verified, false, `${type} should be unverified for an unreachable image`);
+    } else {
+      assert.equal(body.data.verified, undefined, `${type} should never attempt OCR`);
+    }
+  }
+
+  // invalid document type is rejected
+  const invalidDocType = await fetch(`${baseUrl}/registration/${registrationId}/documents/PASSPORT`, {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify({ documentUrl: 'https://s3.example.com/passport.jpg' }),
+  });
+  assert.equal(invalidDocType.status, 422);
+
+  // complete after all sections are done
+  const complete = await fetch(`${baseUrl}/registration/${registrationId}/complete`, {
+    method: 'POST',
+    headers: authHeaders,
+  });
+  assert.equal(complete.status, 200);
+  const completeBody = await complete.json();
+  assert.equal(completeBody.data.completed, true);
+
+  const status = await fetch(`${baseUrl}/registration/status`, { headers: authHeaders });
+  const statusBody = await status.json();
+  assert.equal(statusBody.data.completed, true);
 });

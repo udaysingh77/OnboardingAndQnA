@@ -47,6 +47,22 @@ const envSchema = z.object({
 
   DEFAULT_REGISTRATION_STATUS: z.string().default('started'),
   REGISTRATION_TOTAL_STEPS: z.coerce.number().int().positive().default(10),
+
+  OCR_PROVIDER: z.enum(['http', 'stub']).default('http'),
+  OCR_API_BASE_URL: z.string().default('https://ocr.choira.io'),
+  OCR_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+
+  TYPEBOT_API_BASE_URL: z.string().default('https://typebot.io'),
+  // The bot's internal id (preview mode) or publicId (once published) - see TYPEBOT_PREVIEW_MODE.
+  TYPEBOT_ID: z.string().optional(),
+  // z.coerce.boolean() would treat the string "false" as truthy - compare explicitly instead.
+  TYPEBOT_PREVIEW_MODE: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
+  TYPEBOT_API_TOKEN: z.string().optional(),
+  TYPEBOT_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  MAX_UPLOAD_SIZE_MB: z.coerce.number().int().positive().default(10),
 });
 
 const parsed = envSchema.safeParse(process.env);

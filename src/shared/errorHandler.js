@@ -7,12 +7,17 @@
 import httpStatus from 'http-status-codes';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
-import { appError, validationError, notFoundError, conflictError } from './errors.js';
+import multer from 'multer';
+import { appError, validationError, notFoundError, conflictError, badRequestError } from './errors.js';
 import { logger } from '../utils/logger.js';
 
 function normalizeError(err) {
   if (err instanceof ZodError) {
     return validationError('Validation failed', err.flatten().fieldErrors);
+  }
+
+  if (err instanceof multer.MulterError) {
+    return badRequestError(err.message, { errorCode: 'UPLOAD_ERROR' });
   }
 
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
