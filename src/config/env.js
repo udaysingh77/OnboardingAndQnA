@@ -29,6 +29,19 @@ const envSchema = z.object({
   MSG91_OTP_LENGTH: z.coerce.number().int().positive().default(4),
   MSG91_OTP_EXPIRY: z.coerce.number().int().positive().default(10),
 
+  /* Email OTP configuration */
+  EMAIL_OTP_LENGTH: z.coerce.number().int().positive().default(4),
+  EMAIL_OTP_EXPIRY_MINUTES: z.coerce.number().int().positive().default(2),
+  EMAIL_OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  EMAIL_OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(60),
+
+  /* SMTP (Nodemailer) */
+  SMTP_HOST: z.string().default('smtp.gmail.com'),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z.coerce.boolean().default(false),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+
   SPOTIFY_CLIENT_ID: z.string().optional(),
   SPOTIFY_CLIENT_SECRET: z.string().optional(),
 

@@ -19,3 +19,13 @@ export const verifyOtpSchema = z.object({
     otp: z.string().regex(/^\d{4,6}$/, 'OTP must be 4-6 digits'),
   }),
 });
+
+const emailSchema = z.string().email('Must be a valid email');
+
+export const sendEmailOtpSchema = z.object({
+  body: z.object({ email: emailSchema }),
+});
+
+export const verifyEmailOtpSchema = z.object({
+  body: z.object({ email: emailSchema, otp: z.string().regex(/^\d{4}$/, 'OTP must be exactly 4 digits') }),
+});

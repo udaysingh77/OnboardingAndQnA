@@ -432,6 +432,19 @@ model AppAccountsTemp {
   @@ignore
 }
 
+model EmailVerificationOtp {
+  id         BigInt   @id @default(autoincrement())
+  email      String   @db.NVarChar(256)
+  otpHash    String   @db.NVarChar(256)
+  expiresAt  DateTime @db.DateTime
+  attempts   Int      @default(0)
+  verifiedAt DateTime?
+  createdAt  DateTime @default(now()) @db.DateTime
+  updatedAt  DateTime @updatedAt @db.DateTime
+
+  @@map("Email_Verification_Otp")
+}
+
 model MemberRoleTypeLookUpFees {
   LookupId     BigInt?
   RoleType     String? @db.NVarChar(10)
