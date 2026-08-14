@@ -16,6 +16,8 @@ import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js'
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
 import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
 import { isSpotifyUrlStep, verifySpotifyClaim } from '../services/spotifyGate.js';
+import { resolveProgress } from '../services/typebot/progressMap.js';
+import { isEmailStep, isValidEmail, sendVerificationOtp, verifyVerificationOtp } from '../services/emailOtpGate.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
 // in this order) - see "Document Verification API" for the real OCR
@@ -72,11 +74,21 @@ const OCR_CONFIRM_CHOICE_INPUT = {
   ],
 };
 
+// Synthetic block for the email-OTP step - not a real Typebot block, Studio
+// needs no changes (same non-Typebot-block pattern as OCR_CONFIRM_CHOICE_INPUT).
+const EMAIL_OTP_INPUT = { id: 'email-otp-verification', type: 'text input', options: {} };
+
+function isResendKeyword(message) {
+  const normalized = String(message ?? '').trim().toLowerCase();
+  return normalized === 'resend' || normalized === 'resend otp';
+}
+
 /**
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
 export async function handle({ userId, token, message, attachedFileUrls }) {
   let existing = typebotSessionStore.get(userId);
+  let bypassEmailGate = false;
 
   // A stored session can be a leftover from an earlier, never-finished
   // conversation (in-memory store, only clears on completion or server
@@ -103,7 +115,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
         sessionEnded: false,
         messages: [textMessage('ocr-confirmation-rejected', 'No problem - please upload the document again.')],
         input: existing.input,
-        progress: null,
+        progress: resolveProgress(existing.input.id),
       };
     }
 
@@ -113,6 +125,52 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     existing = typebotSessionStore.get(userId);
     message = undefined;
     attachedFileUrls = [fileUrl];
+  }
+
+  // Resolve a pending email-OTP verification before anything else - the
+  // incoming `message` answers "what's the OTP?" (or "resend"), not the
+  // original email question.
+  if (existing?.pendingEmailVerification && message !== undefined) {
+    const { email } = existing.pendingEmailVerification;
+
+    if (isResendKeyword(message)) {
+      try {
+        await sendVerificationOtp(email);
+        return {
+          sessionEnded: false,
+          messages: [textMessage('email-otp-resent', `We've sent a new OTP to ${email}.`)],
+          input: EMAIL_OTP_INPUT,
+          progress: resolveProgress(existing.input.id),
+        };
+      } catch (err) {
+        return {
+          sessionEnded: false,
+          messages: [textMessage('email-otp-resend-failed', err.message)],
+          input: EMAIL_OTP_INPUT,
+          progress: resolveProgress(existing.input.id),
+        };
+      }
+    }
+
+    try {
+      await verifyVerificationOtp(email, message);
+    } catch (err) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('email-otp-invalid', err.message)],
+        input: EMAIL_OTP_INPUT,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    // Verified: replay this exactly as if the user had just answered the
+    // original email question correctly - existing.input stays the real
+    // Typebot email-input block, so the normal relay/persist logic below
+    // treats `email` as the answer to it.
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    existing = typebotSessionStore.get(userId);
+    bypassEmailGate = true;
+    message = email;
   }
 
   // The Spotify-link step is gated: the conversation only advances past it
@@ -151,9 +209,52 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
           },
         ],
         input: existing.input,
-        progress: null,
+        progress: resolveProgress(existing.input.id),
       };
     }
+  }
+
+  // The email step is gated: a fresh answer to "Provide your email id"
+  // triggers an OTP send instead of relaying straight to Typebot - the
+  // conversation only advances once verifyVerificationOtp() succeeds
+  // (handled above, on a later turn). Skipped on the post-verification
+  // replay (bypassEmailGate) so a just-verified email doesn't re-trigger
+  // a fresh OTP send.
+  if (!bypassEmailGate && existing?.input && message && isEmailStep(existing.input.options?.variableId)) {
+    if (!isValidEmail(message)) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('email-invalid-format', 'That doesn\'t look like a valid email address. Please enter a valid email.')],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    try {
+      await sendVerificationOtp(message);
+    } catch (err) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('email-otp-send-failed', err.message)],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    typebotSessionStore.set(userId, {
+      sessionId: existing.sessionId,
+      input: existing.input,
+      pendingEmailVerification: { email: message },
+    });
+
+    return {
+      sessionEnded: false,
+      messages: [
+        textMessage('email-otp-sent', `We've sent a 4-digit OTP to ${message}. Please enter it to verify (or type "resend" for a new code).`),
+      ],
+      input: EMAIL_OTP_INPUT,
+      progress: resolveProgress(existing.input.id),
+    };
   }
 
   // Typebot's own widget puts the file URL(s) in `text` too (not just
@@ -213,7 +314,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     sessionEnded: ended,
     messages: response.messages,
     input: response.input ?? null,
-    progress: response.progress ?? null,
+    progress: ended ? 100 : resolveProgress(response.input?.id),
   };
 }
 
@@ -272,7 +373,9 @@ export async function handleUpload({ userId, token, file }) {
         sessionEnded: false,
         messages: buildOcrConfirmationMessages(docType, result.extracted),
         input: OCR_CONFIRM_CHOICE_INPUT,
-        progress: null,
+        // OCR_CONFIRM_CHOICE_INPUT is a synthetic block, not a real flow id - the
+        // user hasn't actually left the real upload question yet, so use its progress.
+        progress: resolveProgress(session.input.id),
       };
     }
 
@@ -285,7 +388,7 @@ export async function handleUpload({ userId, token, file }) {
         ),
       ],
       input: session.input,
-      progress: null,
+      progress: resolveProgress(session.input.id),
     };
   }
 
