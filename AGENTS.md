@@ -338,6 +338,17 @@ required documents — see `registration.service.js`'s `complete()`.
     re-upload a clearer image instead, no confirmation choice shown. This exists because OCR's own
     `isValid` flag doesn't catch every misread (a real Union Bank passbook once extracted as "The
     Federal Bank" with `isValid: true`) — a human check catches what automated verification misses.
+  - **`progress`**: Typebot's Chat API never returns a `progress` field (confirmed live against
+    `startChat`/`continueChat` — Studio's Theme "Enable progress bar" toggle only affects Typebot's
+    own embed widget, not the API), so it's self-computed by
+    `modules/conversation/services/typebot/progressMap.js`. The published flow is a branching graph
+    (individual vs company/publisher, GST yes/no, alias yes/no, "member of another society"
+    yes/no), not linear, so `progressMap.js` hardcodes `stepsUntilDone` per input-block id — traced
+    from the flow's actual `groups`/`edges` (fetched via the builder API,
+    `bot.builder.choira.io/api/v1/typebots/{id}/publishedTypebot`) as 1 + the worst-case (max) of
+    each block's successor blocks' `stepsUntilDone`, so the resulting percent is guaranteed
+    non-decreasing regardless of which branch a user takes. Update this map if Studio changes the
+    flow's questions or branches.
 
 ## Spotify Credit Verification
 
@@ -369,6 +380,42 @@ when `true`, skips the real Spotify API call/match check entirely and always ret
 a `logger.warn` each time so a bypass is never silently active). Same purpose as `OTP_PROVIDER=mock`/
 `OCR_PROVIDER=stub` — lets the rest of the conversation flow be tested without owning a real Spotify
 track credited to the exact test account name. **Never leave `true` in a shared/prod `.env`.**
+
+## Email OTP Verification
+
+`modules/auth/services/emailOtp.service.js` (`emailOtpService.sendEmailOtp`/`verifyEmailOtp`,
+merged from the `email` branch, PR #3) — sends a 4-digit OTP via `nodemailer` (`utils/email.js`,
+SMTP config in `envSchema`) to a given email, hashed with `bcrypt` and stored in
+`EmailVerificationOtp` (`Email_Verification_Otp` table, added via `db push` — not in the original
+DB dump). `verifyEmailOtp` enforces expiry (`EMAIL_OTP_EXPIRY_MINUTES`), a resend cooldown
+(`EMAIL_OTP_RESEND_COOLDOWN_SECONDS`), and a max-attempts lockout (`EMAIL_OTP_MAX_ATTEMPTS`), each
+with a clear, user-facing error message. Also exposed standalone as `POST /auth/send-email-otp` /
+`POST /auth/verify-email-otp` (no `authenticate` — usable pre-login), but the conversation flow
+below calls the service directly rather than looping back through HTTP.
+
+**Wired into the conversation flow as a hard gate**, same shape as the Spotify gate —
+`modules/conversation/services/emailOtpGate.js` recognizes the "Provide your email id" email-input
+block by its `variableId` (`EMAIL_VARIABLE_ID` — same id already mapped to `AccountEmail` in
+`conversationFieldMap.js`). Unlike Spotify's single pass/fail check, this is a send-then-verify
+sub-conversation, tracked via a new `pendingEmailVerification: { email }` field in
+`typebotSessionStore` (same shape/precedent as `pendingDocConfirmation`):
+
+- A fresh answer to the email question (format-checked first) triggers `sendVerificationOtp()` and
+  replaces the real input with a synthetic `EMAIL_OTP_INPUT` block (non-Typebot, Studio needs no
+  changes — same pattern as `OCR_CONFIRM_CHOICE_INPUT`) asking for the OTP.
+- `handle()` checks `pendingEmailVerification` before anything else on the next turn: typing
+  `resend`/`resend otp` re-sends a fresh OTP (the service's own cooldown throws its own message if
+  spammed); anything else is treated as the OTP itself. A wrong/expired/maxed-out OTP returns
+  `verifyEmailOtp()`'s own error message and re-shows `EMAIL_OTP_INPUT` — the conversation never
+  reaches Typebot's `continueChat` until verification succeeds. A correct OTP clears
+  `pendingEmailVerification` and replays the turn as if the user had just answered the email
+  question correctly, so the normal relay/persist path (`resolveConversationField` → `AccountEmail`)
+  runs unchanged.
+
+**Setup**: `Email_Verification_Otp` needed an explicit `npx prisma db push` (+ `prisma generate`) —
+it wasn't created by the `email` branch merge alone. `SMTP_USER`/`SMTP_PASSWORD` are optional in
+`envSchema` with no default; without them, `sendVerificationOtp()` fails with `'Failed to send
+email'` and the real email question re-asks — fill them in `.env` for actual delivery.
 
 ## Conventions to preserve
 
