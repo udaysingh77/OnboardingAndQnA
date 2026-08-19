@@ -46,60 +46,12 @@ async function getStatus(userId) {
   return toPublic(account);
 }
 
-async function updateStep(userId, { currentStep }) {
-  if (currentStep < 0 || currentStep > env.REGISTRATION_TOTAL_STEPS) {
-    throw badRequestError(
-      `currentStep must be between 0 and ${env.REGISTRATION_TOTAL_STEPS}`,
-    );
-  }
-
-  const completed = currentStep >= env.REGISTRATION_TOTAL_STEPS;
-  let account = await registrationRepository.findByAccountId(userId);
-  if (!account) throw notFoundError('User not found');
-
-  if (completed && account.ApplicationStatus !== REGISTERED) {
-    account = await registrationRepository.markCompleted(userId);
-  }
-
-  return toPublic(account);
-}
-
 // The registrationId param must match the authenticated user - the id alone is
 // never sufficient to touch another user's registration.
 function assertOwnRegistration(userId, registrationId) {
   if (String(registrationId) !== String(userId)) {
     throw forbiddenError('Registration does not belong to the authenticated user');
   }
-}
-
-async function start(userId) {
-  const account = await registrationRepository.findByAccountId(userId);
-  if (!account) throw notFoundError('User not found');
-
-  if (!account.RegistrationDate) {
-    await registrationRepository.update(userId, { RegistrationDate: new Date() });
-  }
-
-  return { registrationId: String(account.AccountId) };
-}
-
-async function saveBasicDetails(userId, registrationId, body) {
-  assertOwnRegistration(userId, registrationId);
-
-  const account = await registrationRepository.findByAccountId(registrationId);
-  if (!account) throw notFoundError('Registration not found');
-
-  const updated = await registrationRepository.update(registrationId, {
-    FirstName: body.firstName,
-    LastName: body.lastName,
-    AccountName: `${body.firstName} ${body.lastName}`.trim(),
-    AccountEmail: body.email,
-    DOB: new Date(body.dob),
-    Gender: body.gender,
-    AccountAddress: body.address,
-  });
-
-  return toBasicDetailsPublic(updated);
 }
 
 async function saveDocument(userId, registrationId, docType, documentUrl) {
@@ -176,9 +128,7 @@ async function complete(userId, registrationId) {
   // conversationFieldMap.js's unconditional "Provide your email id" question) -
   // the flow has no blocks and no HTTP Request callbacks for first/last name,
   // DOB, gender, or address, so requiring them here would make chat-driven
-  // completion permanently impossible. FirstName/LastName/DOB/Gender/
-  // AccountAddress can still be filled via PATCH .../basic-details for other
-  // (non-chat) registration paths, but aren't required to complete.
+  // completion permanently impossible.
   const missing = [];
   if (!account.AccountEmail) missing.push('basic-details');
 
@@ -197,19 +147,6 @@ async function complete(userId, registrationId) {
 
   const updated = account.ApplicationStatus === REGISTERED ? account : await registrationRepository.markCompleted(registrationId);
   return toPublic(updated);
-}
-
-function toBasicDetailsPublic(account) {
-  return {
-    registrationId: String(account.AccountId),
-    firstName: account.FirstName,
-    lastName: account.LastName,
-    email: account.AccountEmail,
-    dob: account.DOB,
-    gender: account.Gender,
-    address: account.AccountAddress,
-    updatedAt: account.ModifedDate,
-  };
 }
 
 function toDocumentPublic(doc, ocrResult) {
@@ -237,9 +174,6 @@ function toPublic(account) {
 export const registrationService = {
   getIdentityNames,
   getStatus,
-  updateStep,
-  start,
-  saveBasicDetails,
   saveDocument,
   saveConversationField,
   complete,

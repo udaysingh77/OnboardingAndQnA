@@ -64,8 +64,9 @@ src/
 ├─ middlewares/     auth.js (JWT), rateLimiter.js
 ├─ modules/
 │  ├─ auth/         services/otp/{interface,factory,mock,msg91} + tokenBlacklist.js
-│  ├─ user/         controllers/services/repositories/validators
-│  ├─ registration/  "
+│  ├─ user/         repository only - service/controller/routes/validators removed, unused
+│  │                (auth.service.js imports user.repository.js directly at login)
+│  ├─ registration/  controllers/services/repositories/validators
 │  ├─ conversation/ services/{conversation.router,typebot/*} + engines/{aiEngine,registrationEngine}.js
 │  └─ health/
 ├─ app.js           middleware + route assembly
@@ -184,18 +185,19 @@ relay (see Conversation Router below), `saveDocument()` is instead called **in-p
 `complete()` is called **in-process** from `registrationEngine.handle()` when the Typebot session
 ends. **The live published flow has zero HTTP Request blocks of any kind** (confirmed via the
 builder API, `bot.builder.choira.io/api/v1/typebots/{id}/publishedTypebot`) — Typebot itself never
-calls `basic-details` or `complete`; both are driven entirely in-process by this backend now. The
-routes below still exist and work standalone (e.g. for a non-chat registration path that wants to
-call `basic-details`/`complete` directly), they're just no longer the only, or even the primary,
-caller:
+called `basic-details` or `complete` even before this, since no HTTP Request blocks exist in the
+flow to call them.
 
-- `POST /registration/start` — returns `{ registrationId }`. **`registrationId` is just the
-  stringified `App_Accounts.AccountId`** (already the JWT `sub`) — there is no separate
-  registration-session concept. Idempotent; sets `RegistrationDate` if still null.
-- `PATCH /registration/:registrationId/basic-details` — maps to `FirstName`, `LastName`,
-  `AccountName` (derived), `AccountEmail`, `DOB`, `Gender`, `AccountAddress`. Body is `.strict()`
-  Zod — a `mobile` field (or any unrecognized field) is rejected with 422, since `AccountMobile`
-  is the OTP-verified identity and must not be overwritten here.
+**`POST /registration/start`, `PATCH /registration/:registrationId/basic-details`, and
+`PUT /registration/status` were removed** — grepped every call site in `src/` and confirmed nothing
+in the live chat flow (or anywhere else internally) ever called them; `registrationId` is just the
+stringified `App_Accounts.AccountId` already returned at login (`user.id`), so `start()` was a
+no-op wrapper, and `saveBasicDetails()`/`updateStep()` collected fields (`FirstName`/`LastName`/
+`DOB`/`Gender`/`AccountAddress`, or a linear step count) the Typebot flow never asks for and no
+other caller ever populated. `registration.service.js` no longer exports `start`/`saveBasicDetails`/
+`updateStep`. `GET /registration/status` stays — it's the real, documented signal the frontend uses
+to check `completed: true/false`.
+
 - `POST /registration/:registrationId/documents/:documentType` — body `{ documentUrl }` (S3 URL
   from Typebot's own upload). `documentType` is a Zod enum: `PAN`, `AADHAAR`, `BANK`, `NOC`,
   `COMPANY_DOC`, `PROFILE_PHOTO` (a single generalized route, not one per type — reuses
@@ -206,12 +208,12 @@ caller:
   **`DocumentLookupId` is intentionally left `null`** — `Doc_LookUp` has zero seed rows in the
   current DB/dump, so there's nothing valid to reference; wire it up once that lookup table is
   populated.
-- `POST /registration/:registrationId/complete` — requires basic-details fields populated + the
+- `POST /registration/:registrationId/complete` — requires `AccountEmail` set + the
   3 *required* documents uploaded (`PAN`, `AADHAAR`, `BANK` — see `REQUIRED_DOC_TYPES` in
   `registration.service.js`; `NOC`/`COMPANY_DOC`/`PROFILE_PHOTO` are conditional/optional in the
   Typebot flow and don't gate completion), else 400 `REGISTRATION_INCOMPLETE` with a
   `details.missing` list. Otherwise reuses the existing `markCompleted`/`toPublic`
-  (`ApplicationStatus = 1`) already used by `GET/PUT /status`.
+  (`ApplicationStatus = 1`) already used by `GET /status`.
 
 **Fields intentionally not persisted**: the actual Typebot flow also asks about role
 (lyricist/composer), membership in another society, tax residency, and a Spotify link. None of
@@ -371,9 +373,11 @@ checks the claimed track's artist credits against the account's `AccountName` *o
 any reason - treated the same as a non-match, never crashes the turn), the answer is **never sent to
 Typebot's `continueChat`** - the session stays exactly where it was, and a rejection message asking
 for another link is returned directly. Only a genuine match lets the turn fall through to the normal
-relay path, advancing the conversation as usual. `actualName` for this check is `AccountName`
-(`FirstName`+`LastName` from the `basic-details` step), not the Aadhaar-OCR name (still intentionally
-unpersisted, see above).
+relay path, advancing the conversation as usual. `actualName` for this check is `AccountName` —
+not the Aadhaar-OCR name (still intentionally unpersisted, see above). Nothing in this app's live
+code path writes `AccountName` (the `basic-details` endpoint that used to derive it from
+`firstName`+`lastName` was removed as chat-flow-orphaned — see "Typebot Registration Flow" above);
+it's populated by whatever created the `App_Accounts` row before the chat flow starts.
 
 `SPOTIFY_VERIFICATION_BYPASS` (default `false`) — dev-only escape hatch for `verifySpotifyClaim()`:
 when `true`, skips the real Spotify API call/match check entirely and always returns verified (logs
