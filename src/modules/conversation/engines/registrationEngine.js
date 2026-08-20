@@ -18,6 +18,7 @@ import { resolveConversationField } from '../services/typebot/conversationFieldM
 import { isSpotifyUrlStep, verifySpotifyClaim } from '../services/spotifyGate.js';
 import { resolveProgress } from '../services/typebot/progressMap.js';
 import { isEmailStep, isValidEmail, sendVerificationOtp, verifyVerificationOtp } from '../services/emailOtpGate.js';
+import { isAddressProofTypeStep, resolveAddressProofOcrType } from '../services/typebot/addressProofTypeMap.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
 // in this order) - see "Document Verification API" for the real OCR
@@ -36,7 +37,51 @@ const OCR_FIELD_LABELS = {
     state: 'State',
     micr: 'MICR Code',
   },
+  // Not live on ocr.choira.io yet (see registration.service.js's OCR_DOC_TYPES comment) - wired
+  // ahead of deployment. Curated user-facing subset of the "Document Verification API" collection's
+  // fields, not the internal-only meta fields (detectionScore/formatTier/ocrValid/governmentVerified).
+  DRIVING_LICENCE: {
+    name: 'Name',
+    drivingLicence: 'Licence Number',
+    state: 'State',
+    validTill: 'Valid Till',
+    vehicleClasses: 'Vehicle Classes',
+    issuingAuthority: 'Issuing Authority',
+    address: 'Address',
+  },
+  VOTER_ID: {
+    name: 'Name',
+    epicNumber: 'EPIC Number',
+    fatherOrHusbandName: 'Relation Name',
+    gender: 'Gender',
+    address: 'Address',
+    state: 'State',
+    assemblyConstituency: 'Assembly Constituency',
+  },
+  // Field names are a best-effort guess from the collection's one-line description ("MRZ and
+  // printed fields") following this API's established naming convention (see PAN/DRIVING_LICENCE
+  // above) - not yet confirmed against a real success response. Harmless if wrong: unmatched keys
+  // are simply omitted from the confirmation message (see buildOcrConfirmationMessages's filter).
+  PASSPORT: {
+    name: 'Name',
+    passportNumber: 'Passport Number',
+    dob: 'Date of Birth',
+    nationality: 'Nationality',
+    expiryDate: 'Valid Till',
+  },
+  // Same caveat as PASSPORT - collection only documents "Bill name + address".
+  ELECTRICITY: { name: 'Name', address: 'Address' },
+  // passport-photo's response shape is confirmed (nested under document/extractedData, not flat
+  // top-level keys like every other doc type) - buildOcrConfirmationMessages resolves dotted paths.
+  PROFILE_PHOTO: {
+    'document.status': 'Status',
+    'extractedData.faceCount': 'Faces Detected',
+  },
 };
+
+function getPath(obj, path) {
+  return path.split('.').reduce((value, key) => value?.[key], obj);
+}
 
 function isAffirmative(message) {
   const normalized = String(message ?? '').trim().toLowerCase();
@@ -54,7 +99,7 @@ function textMessage(id, text) {
 function buildOcrConfirmationMessages(docType, extracted) {
   const labels = OCR_FIELD_LABELS[docType] ?? {};
   const lines = Object.entries(labels)
-    .map(([key, label]) => [label, extracted?.[key]])
+    .map(([key, label]) => [label, getPath(extracted, key)])
     .filter(([, value]) => value != null && value !== '')
     .map(([label, value]) => `${label}: ${value}`);
 
@@ -274,6 +319,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
 
   // `message` answers the question the user was just asked (existing.input),
   // not the new one in `response.input` - persist it before overwriting the session.
+  let addressProofOcrType;
   if (existing?.input && message) {
     const field = resolveConversationField(existing.input.options?.variableId);
     if (field) {
@@ -282,6 +328,14 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       } catch (err) {
         logger.warn({ userId, field, err }, 'Failed to persist conversation answer, continuing relay');
       }
+    }
+
+    // Remember which document type the user just picked for their permanent/current address
+    // proof - the paired file-upload question (next turn) has no way to know this on its own,
+    // since the upload lands in one shared variable regardless of type. Consulted by
+    // handleUpload() to decide OCR routing (see addressProofTypeMap.js).
+    if (isAddressProofTypeStep(existing.input.options?.variableId)) {
+      addressProofOcrType = resolveAddressProofOcrType(message);
     }
   }
 
@@ -307,7 +361,11 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       }
     }
   } else {
-    typebotSessionStore.set(userId, { sessionId, input: response.input });
+    typebotSessionStore.set(userId, {
+      sessionId,
+      input: response.input,
+      ...(addressProofOcrType !== undefined ? { addressProofOcrType } : {}),
+    });
   }
 
   return {
@@ -352,9 +410,17 @@ export async function handleUpload({ userId, token, file }) {
   });
 
   const docType = resolveDocumentType(variableId);
+  // Address-proof uploads (permanent/current) don't carry their own document type - it was
+  // recorded a turn earlier from the paired type-choice question (see addressProofTypeMap.js /
+  // registrationEngine.handle()). null means an unsupported type (Passport/Electricity Bill/
+  // Letter from Property Owner) or none recorded - saveDocument() falls back to docType itself,
+  // which isn't in OCR_DOC_TYPES, so OCR is correctly skipped.
+  const isAddressProofUpload = docType === 'PERMANENT_ADDRESS_PROOF' || docType === 'CURRENT_ADDRESS_PROOF';
+  const ocrDocType = isAddressProofUpload ? session.addressProofOcrType : undefined;
+
   let result = null;
   if (docType) {
-    result = await registrationService.saveDocument(userId, userId, docType, fileUrl);
+    result = await registrationService.saveDocument(userId, userId, docType, fileUrl, ocrDocType);
   }
 
   // OCR was attempted (result carries an `extracted` key, even if null) -
@@ -362,6 +428,11 @@ export async function handleUpload({ userId, token, file }) {
   // if nothing could be read at all. Non-OCR doc types (no `extracted` key
   // present) fall straight through to the normal advance, unchanged.
   if (result && Object.prototype.hasOwnProperty.call(result, 'extracted')) {
+    // Use the specific OCR type consulted (e.g. DRIVING_LICENCE) for field labels when this was
+    // an address-proof upload, not the generic PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF
+    // caption - OCR_FIELD_LABELS has no entry for the generic caption itself.
+    const labelDocType = ocrDocType ?? docType;
+
     if (result.extracted) {
       typebotSessionStore.set(userId, {
         sessionId: session.sessionId,
@@ -371,7 +442,7 @@ export async function handleUpload({ userId, token, file }) {
 
       return {
         sessionEnded: false,
-        messages: buildOcrConfirmationMessages(docType, result.extracted),
+        messages: buildOcrConfirmationMessages(labelDocType, result.extracted),
         input: OCR_CONFIRM_CHOICE_INPUT,
         // OCR_CONFIRM_CHOICE_INPUT is a synthetic block, not a real flow id - the
         // user hasn't actually left the real upload question yet, so use its progress.
@@ -384,7 +455,7 @@ export async function handleUpload({ userId, token, file }) {
       messages: [
         textMessage(
           'ocr-extraction-failed',
-          `We couldn't read this ${docType} document clearly. Please upload a clearer, better-quality image.`,
+          `We couldn't read this ${labelDocType} document clearly. Please upload a clearer, better-quality image.`,
         ),
       ],
       input: session.input,

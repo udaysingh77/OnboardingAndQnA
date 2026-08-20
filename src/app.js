@@ -11,7 +11,6 @@ import { requestLogger } from './utils/logger.js';
 import { globalRateLimiter } from './middlewares/rateLimiter.js';
 import { errorHandler, notFoundHandler } from './shared/errorHandler.js';
 import authRoutes from './modules/auth/routes/auth.routes.js';
-import userRoutes from './modules/user/routes/user.routes.js';
 import registrationRoutes from './modules/registration/routes/registration.routes.js';
 import conversationRoutes from './modules/conversation/routes/conversation.routes.js';
 import healthRoutes from './modules/health/routes/health.routes.js';
@@ -37,7 +36,6 @@ app.use(requestLogger());
 // --- Routes ---
 app.use('/health', healthRoutes);
 app.use('/auth', authRoutes);
-app.use('/users', userRoutes);
 app.use('/registration', registrationRoutes);
 app.use('/conversation', conversationRoutes);
 app.use('/spotify', spotifyRoutes);

@@ -13,7 +13,7 @@ function findByAccountId(accountId) {
 function markCompleted(accountId) {
   return prisma.appAccounts.update({
     where: { AccountId: BigInt(accountId) },
-    data: { ApplicationStatus: 1 },
+    data: { ApplicationStatus: 1, Detail10: 'choira' },
   });
 }
 

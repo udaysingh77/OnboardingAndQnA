@@ -132,7 +132,7 @@ test('auth round-trip: send-otp -> verify-otp -> protected endpoint', async (t) 
   assert.equal(afterLogoutBody.error.code, 'UNAUTHORIZED');
 });
 
-test('Typebot registration flow: start -> basic-details -> documents -> complete', async (t) => {
+test('Registration flow: documents -> complete', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
   if ((process.env.OTP_PROVIDER ?? 'mock') !== 'mock') {
     return t.skip('Registration flow only works with the mock OTP provider');
@@ -156,12 +156,8 @@ test('Typebot registration flow: start -> basic-details -> documents -> complete
   const token = verifiedBody.data.token;
   const authHeaders = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 
-  // start
-  const start = await fetch(`${baseUrl}/registration/start`, { method: 'POST', headers: authHeaders });
-  assert.equal(start.status, 200);
-  const startBody = await start.json();
-  const registrationId = startBody.data.registrationId;
-  assert.equal(registrationId, verifiedBody.data.user.id);
+  // registrationId is just the stringified AccountId - already known from login, no /start needed.
+  const registrationId = verifiedBody.data.user.id;
 
   // unauthorized (no token)
   const noAuth = await fetch(`${baseUrl}/registration/${registrationId}/documents/PAN`, {
@@ -173,29 +169,12 @@ test('Typebot registration flow: start -> basic-details -> documents -> complete
 
   // mismatched registrationId is rejected (ownership check), regardless of DB state
   const foreignId = String(BigInt(registrationId) + 1n);
-  const forbidden = await fetch(`${baseUrl}/registration/${foreignId}/basic-details`, {
-    method: 'PATCH',
+  const forbidden = await fetch(`${baseUrl}/registration/${foreignId}/documents/PAN`, {
+    method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify({
-      firstName: 'Uday',
-      lastName: 'Singh',
-      email: `uday${Date.now()}@example.com`,
-      dob: '1998-05-10',
-      gender: 'Male',
-      address: 'Mumbai',
-    }),
+    body: JSON.stringify({ documentUrl: 'https://s3.example.com/pan.jpg' }),
   });
   assert.equal(forbidden.status, 403);
-
-  // invalid basic details (missing required fields)
-  const invalidBasic = await fetch(`${baseUrl}/registration/${registrationId}/basic-details`, {
-    method: 'PATCH',
-    headers: authHeaders,
-    body: JSON.stringify({ firstName: 'Uday' }),
-  });
-  assert.equal(invalidBasic.status, 422);
-  const invalidBasicBody = await invalidBasic.json();
-  assert.equal(invalidBasicBody.error.code, 'VALIDATION_ERROR');
 
   // complete before sections are done -> incomplete
   const incomplete = await fetch(`${baseUrl}/registration/${registrationId}/complete`, {
@@ -206,28 +185,21 @@ test('Typebot registration flow: start -> basic-details -> documents -> complete
   const incompleteBody = await incomplete.json();
   assert.equal(incompleteBody.error.code, 'REGISTRATION_INCOMPLETE');
 
-  // valid basic details
-  const basicDetails = await fetch(`${baseUrl}/registration/${registrationId}/basic-details`, {
-    method: 'PATCH',
-    headers: authHeaders,
-    body: JSON.stringify({
-      firstName: 'Uday',
-      lastName: 'Singh',
-      email: `uday${Date.now()}@example.com`,
-      dob: '1998-05-10',
-      gender: 'Male',
-      address: 'Mumbai',
-    }),
+  // complete() only requires AccountEmail (the one field the live chat flow actually collects) -
+  // set it directly via Prisma, since the basic-details REST endpoint was removed as unused
+  // (the Typebot flow never calls it - see AGENTS.md).
+  await prisma.appAccounts.update({
+    where: { AccountId: BigInt(registrationId) },
+    data: { AccountEmail: `uday${Date.now()}@example.com` },
   });
-  assert.equal(basicDetails.status, 200);
-  const basicDetailsBody = await basicDetails.json();
-  assert.equal(basicDetailsBody.data.firstName, 'Uday');
 
-  // documents - covers the original required 3 (OCR-eligible) plus one generalized extra type (not).
-  // The fake s3.example.com URLs can't be OCR'd for real, so PAN/AADHAAR/BANK are expected to come
-  // back unverified rather than fail the upload - that graceful-degradation path is the point here.
-  const OCR_TYPES = new Set(['PAN', 'AADHAAR', 'BANK']);
-  for (const type of ['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO']) {
+  // documents - PAN/BANK/PERMANENT_ADDRESS_PROOF are what complete() now requires (the live chat
+  // flow's actual mandatory set), plus AADHAAR (no longer required, but still a valid OCR'd type -
+  // exercises that code path) and PROFILE_PHOTO (now OCR'd via the passport-photo endpoint).
+  // The fake s3.example.com URLs can't be OCR'd for real, so these are expected to come back
+  // unverified rather than fail the upload - that graceful-degradation path is the point here.
+  const OCR_TYPES = new Set(['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO']);
+  for (const type of ['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO', 'PERMANENT_ADDRESS_PROOF']) {
     const res = await fetch(`${baseUrl}/registration/${registrationId}/documents/${type}`, {
       method: 'POST',
       headers: authHeaders,
