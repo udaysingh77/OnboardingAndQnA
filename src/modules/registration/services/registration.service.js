@@ -12,16 +12,42 @@ import { createOcrProvider } from './ocr/ocrProvider.factory.js';
 const REGISTERED = 1;
 const DOC_TYPES = Object.freeze({
   PAN: 'PAN',
-  AADHAAR: 'AADHAAR',
+  AADHAAR: 'AADHAAR', // no longer collected by the live flow (replaced by address-proof below) -
+  // kept for back-compat, still usable via a direct REST call.
   BANK: 'BANK',
   NOC: 'NOC',
   COMPANY_DOC: 'COMPANY_DOC',
   PROFILE_PHOTO: 'PROFILE_PHOTO',
+  // Generic "address proof" upload slots (permanent/current) - the live flow lets the user pick
+  // one of 5 document types (Passport/Electricity Bill/Driving Licence/Voter ID/Letter from
+  // Property Owner) for each, but always uploads into one of these two shared variables. Which
+  // type was picked is routed to OCR conditionally - see addressProofTypeMap.js.
+  PERMANENT_ADDRESS_PROOF: 'PERMANENT_ADDRESS_PROOF',
+  CURRENT_ADDRESS_PROOF: 'CURRENT_ADDRESS_PROOF',
+  // OCR-only doc types reachable via PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads when
+  // the user picked one of these as their address-proof type - never a DocumentCaption on their
+  // own, only ever passed as saveDocument()'s ocrDocType override. "Letter from Property Owner"
+  // (the 5th address-proof choice) has no matching OCR endpoint anywhere and stays unmapped.
+  DRIVING_LICENCE: 'DRIVING_LICENCE',
+  VOTER_ID: 'VOTER_ID',
+  PASSPORT: 'PASSPORT',
+  ELECTRICITY: 'ELECTRICITY',
 });
-// Only these gate /complete - NOC/COMPANY_DOC/PROFILE_PHOTO are conditional/optional in the flow.
-const REQUIRED_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR, DOC_TYPES.BANK];
-// OCR only runs for these three - NOC/company docs/profile photos are saved as-is.
-const OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR, DOC_TYPES.BANK];
+// Only these gate /complete - NOC/COMPANY_DOC/PROFILE_PHOTO/CURRENT_ADDRESS_PROOF are
+// conditional/optional in the flow. PERMANENT_ADDRESS_PROOF replaces AADHAAR as the mandatory
+// address-proof step - the live flow never asks for Aadhaar specifically anymore.
+const REQUIRED_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.BANK, DOC_TYPES.PERMANENT_ADDRESS_PROOF];
+// OCR runs for these - NOC/company docs/address-proof-with-an-unsupported-type are saved as-is.
+const OCR_DOC_TYPES = [
+  DOC_TYPES.PAN,
+  DOC_TYPES.AADHAAR,
+  DOC_TYPES.BANK,
+  DOC_TYPES.DRIVING_LICENCE,
+  DOC_TYPES.VOTER_ID,
+  DOC_TYPES.PASSPORT,
+  DOC_TYPES.ELECTRICITY,
+  DOC_TYPES.PROFILE_PHOTO,
+];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
@@ -54,14 +80,18 @@ function assertOwnRegistration(userId, registrationId) {
   }
 }
 
-async function saveDocument(userId, registrationId, docType, documentUrl) {
+// `ocrDocType` lets a caller run OCR under a different type than the DocumentCaption being saved -
+// used for PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads, where the DB row stays generic
+// but the actual document might be a Driving Licence or Voter ID (see addressProofTypeMap.js).
+async function saveDocument(userId, registrationId, docType, documentUrl, ocrDocType) {
   assertOwnRegistration(userId, registrationId);
 
   const account = await registrationRepository.findByAccountId(registrationId);
   if (!account) throw notFoundError('Registration not found');
 
-  const ocrResult = OCR_DOC_TYPES.includes(docType)
-    ? await runOcrAndPersist(registrationId, docType, documentUrl)
+  const effectiveOcrType = ocrDocType ?? docType;
+  const ocrResult = OCR_DOC_TYPES.includes(effectiveOcrType)
+    ? await runOcrAndPersist(registrationId, effectiveOcrType, documentUrl)
     : null;
 
   // DocStatus: 0 = no OCR attempted (NOC/COMPANY_DOC/PROFILE_PHOTO), 1 = OCR-verified, 2 = OCR failed.
@@ -86,7 +116,10 @@ async function saveConversationField(userId, registrationId, field, value) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) return;
 
-  await registrationRepository.update(registrationId, { [field]: trimmed });
+  const update = { [field]: trimmed };
+  if (field === 'GSTNo') update.Detail1 = trimmed;
+
+  await registrationRepository.update(registrationId, update);
 }
 
 // A failed OCR extraction never fails the upload - the document still saves,
@@ -96,7 +129,7 @@ async function runOcrAndPersist(registrationId, docType, documentUrl) {
     const extracted = await ocrProvider.extract({ docType, documentUrl });
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
-      await registrationRepository.update(registrationId, { PANNo: extracted.pan });
+      await registrationRepository.update(registrationId, { PANNo: extracted.pan, Detail2: extracted.pan });
     }
 
     if (docType === DOC_TYPES.BANK) {
@@ -111,9 +144,18 @@ async function runOcrAndPersist(registrationId, docType, documentUrl) {
 
     // Aadhaar's extracted number/name/dob/gender/address are intentionally not
     // persisted to AppAccounts - only used here to compute `verified`.
-    return { verified: Boolean(extracted.isValid), extracted };
+    // PROFILE_PHOTO (passport-photo endpoint) has a different response shape - no top-level
+    // isValid, instead a nested document.status of VALID/REVIEW/INVALID.
+    const verified = docType === DOC_TYPES.PROFILE_PHOTO
+      ? extracted.document?.status === 'VALID'
+      : Boolean(extracted.isValid);
+
+    return { verified, extracted };
   } catch (err) {
-    logger.warn({ registrationId, docType, err }, 'OCR extraction failed, document saved unverified');
+    logger.warn(
+      { registrationId, docType, stage: err.details?.stage, details: err.details, err },
+      'OCR extraction failed, document saved unverified',
+    );
     return { verified: false, extracted: null };
   }
 }

@@ -217,14 +217,23 @@ to check `completed: true/false`.
 
 **Fields intentionally not persisted**: the actual Typebot flow also asks about role
 (lyricist/composer), membership in another society, tax residency, and a Spotify link. None of
-these map to a documented `AppAccounts` column — the only unused-looking slots are the generic
-`Detail1`…`Detail12` free-text columns, but that's shared production data (`Dreamsoft_UAT`) whose
-usage elsewhere is unverified, so nothing guesses a mapping. These answers live only in Typebot's
-own result store, not in this DB, until a real column/mapping is confirmed.
+these map to a documented `AppAccounts` column — the generic `Detail1`…`Detail12` free-text columns
+are shared production data (`Dreamsoft_UAT`) whose usage elsewhere is unverified, so nothing guesses
+a mapping for these. These answers live only in Typebot's own result store, not in this DB, until a
+real column/mapping is confirmed.
 
 **GST number, stage name/alias, and email** *are* persisted (via `conversationFieldMap.js` +
 `registrationService.saveConversationField()`, see "Conversation Router" below) — `GSTNo` (new
 column, added the same way `PANNo` was) and the existing `AccountAlias`/`AccountEmail` columns.
+
+**Confirmed `Detail1`/`Detail2`/`Detail10` mapping** (user-provided, unlike the rest of
+`Detail1`–`Detail12` which stay unmapped): `Detail1` gets a duplicate write of the GST number
+(alongside `GSTNo`, in `saveConversationField()`) and `Detail2` gets a duplicate write of the OCR'd
+PAN (alongside `PANNo`, in `runOcrAndPersist()`) — both additive, not replacing the named columns.
+`Detail10` is set to the literal string `'choira'` by `registrationRepository.markCompleted()`, once,
+the first time `ApplicationStatus` flips to 1 — a marker for other `Dreamsoft_UAT` consumers that
+this registration came through the Choira onboarding flow. `Detail3`–`Detail9`, `Detail11`,
+`Detail12` remain unmapped/unused.
 
 **Auth model**: Typebot runs the existing `/auth/send-otp` + `/auth/verify-otp` first (no new
 token mechanism), stores `token` + `registrationId` as variables, and sends
@@ -233,12 +242,43 @@ Every new service function additionally calls `assertOwnRegistration(userId, reg
 (in `registration.service.js`), which 403s if the path param doesn't match `req.user.id` — the id
 alone is never sufficient to touch another user's registration.
 
-**OCR**: implemented for `PAN`/`AADHAAR`/`BANK` only — `NOC`/`COMPANY_DOC`/`PROFILE_PHOTO` never
-trigger OCR, they just save. `modules/registration/services/ocr/` follows the OTP provider pattern
-exactly: `ocrProvider.interface.js` (contract), `ocrProvider.factory.js` (selects by `OCR_PROVIDER`
-env, `http` default / `stub` for local dev without network), `httpOcrProvider.js` (calls the real
-`https://ocr.choira.io` service — see `Document Verification API.postman_collection.json` for the
-full contract), `stubOcrProvider.js` (always throws, kept for `OCR_PROVIDER=stub`).
+**OCR**: implemented for `PAN`/`AADHAAR`/`BANK`/`DRIVING_LICENCE`/`VOTER_ID`/`PASSPORT`/`ELECTRICITY`/`PROFILE_PHOTO`
+(`PROFILE_PHOTO` via the `passport-photo` endpoint - face detection + photo-quality checks) —
+`NOC`/`COMPANY_DOC` never trigger OCR, they just save. `PROFILE_PHOTO`'s response shape differs from
+every other doc type (nested `document.status`/`extractedData.faceCount`, no top-level `isValid`) -
+`runOcrAndPersist()` special-cases it (`extracted.document?.status === 'VALID'`) and
+`OCR_FIELD_LABELS.PROFILE_PHOTO` in `registrationEngine.js` uses dotted-path keys, resolved by a
+small `getPath()` helper `buildOcrConfirmationMessages()` now uses instead of a flat `extracted?.[key]`
+lookup. `society-noc` was deliberately **not** wired: its consistency check needs
+`applicantName`/`societyName`/`flatNumber`, and neither `societyName` nor `flatNumber` exists
+anywhere in this codebase (no `AppAccounts` column, no Typebot question) - also unclear whether the
+flow's "NOC" upload step is even a housing-society NOC. `PASSPORT`/`ELECTRICITY`'s
+`OCR_FIELD_LABELS` field names are a best-effort guess (the collection only documented them as
+one-liners: "MRZ and printed fields" / "Bill name + address") - unmatched keys are silently omitted
+from the confirmation message (harmless), but worth confirming against a real success response if a
+user reports a suspiciously empty confirmation for these two.
+`modules/registration/services/ocr/` follows the OTP provider pattern exactly:
+`ocrProvider.interface.js` (contract), `ocrProvider.factory.js` (selects by `OCR_PROVIDER` env,
+`http` default / `stub` for local dev without network), `httpOcrProvider.js` (calls the real
+`https://ocr.choira.io` service), `stubOcrProvider.js` (always throws, kept for
+`OCR_PROVIDER=stub`).
+
+**On the "Document Verification API" Postman collection**: this service's transport contract has
+flip-flopped **three times** during this project — JSON `{documentUrl}` → multipart `document` file
+→ back to JSON `{documentUrl}`. **Currently confirmed live** (matches the latest collection the user
+supplied, `document-verification.postman_collection (1)new.json`): the service accepts a JSON body
+`{ documentUrl }` on `POST {OCR_API_BASE_URL}/api/documents/{pan|aadhaar|bank|driving-licence|voter-id}`
+and returns a `{success, message, code, data}` envelope; a multipart upload is explicitly rejected
+with `415 UPLOAD_NOT_SUPPORTED` ("Send the document link in the 'documentUrl' field of a JSON
+body"). `httpOcrProvider.js` sends JSON directly (`documentUrl` passed straight through, no
+download/re-upload step needed). Errors carry `details: { stage: 'ocr_call', ...body }` for
+diagnosability (see `runOcrAndPersist()`'s catch in `registration.service.js`, which logs `stage`
+and `details` before degrading to "unverified"). **Lesson, worth repeating**: don't trust a past
+empirical finding here without re-probing live (`curl`) if OCR starts failing again — this has
+flipped multiple times with no changelog. `/api/documents/bank` isn't in the collection's own
+documented endpoint list, but **is live and working** (confirmed via probe - returns a real
+`DOCUMENT_NUMBER_NOT_FOUND` with a bank-specific message about account number/IFSC, not a 404), so
+`DOC_TYPE_PATHS.BANK: 'bank'` in `httpOcrProvider.js` stays as-is.
 
 `saveDocument()` in `registration.service.js` calls `ocrProvider.extract()` before upserting the
 doc row, so the final `App_Accounts_Doc.DocStatus` is written once: `0` = no OCR attempted,
@@ -254,7 +294,12 @@ What gets persisted to `AppAccounts` from a successful OCR result, and what does
   primary key) and isn't the table this app writes to.
 - **Aadhaar**: extracted number/name/dob/gender/address are used only to compute `verified` —
   never written to `AppAccounts`. Same reasoning as the role/tax-residency/etc. fields above: no
-  safe existing column, and this one wasn't worth a schema change.
+  safe existing column, and this one wasn't worth a schema change. **Aadhaar as its own upload
+  step is gone from the live flow** (replaced by the generalized address-proof flow below) — the
+  `AADHAAR` doc type/OCR path is kept only for direct REST testability, chat can't reach it anymore.
+- **Driving Licence / Voter ID**: same treatment as Aadhaar — extracted fields are used only to
+  compute `verified` for the confirmation gate, nothing is written to `AppAccounts` (no matching
+  columns exist for either).
 - **Bank**: `bankName`/`accountNumber`/`ifsc`/`branch`/`micr` map onto the existing
   `BankName`/`BankAcNo`/`BankIFSCCode`/`BankBranchName`/`MicrCode` columns and get auto-filled on
   success (only fields OCR actually returned — never overwritten with `null`). The bank OCR
@@ -285,8 +330,10 @@ live published flow has no HTTP Request blocks (verified via the builder API), s
 `registrationEngine.handle()` calls `registrationService.complete()` itself when the Typebot
 session ends (`sessionEnded: true`). Because the flow never asks for first/last name, DOB, or
 gender, and its `address` variable is unused, `complete()`'s basic-details gate only requires
-`AccountEmail` (the one field the flow does collect, via `conversationFieldMap.js`) plus the 3
-required documents — see `registration.service.js`'s `complete()`.
+`AccountEmail` (the one field the flow does collect, via `conversationFieldMap.js`) plus
+`PAN`/`BANK`/`PERMANENT_ADDRESS_PROOF` (`REQUIRED_DOC_TYPES` — `PERMANENT_ADDRESS_PROOF` replaced
+`AADHAAR` here, since the live flow no longer collects Aadhaar specifically) — see
+`registration.service.js`'s `complete()`.
 
 - `modules/conversation/services/typebot/typebotClient.js` — `startChat`, `continueChat`,
   `generateUploadUrl`, `uploadToPresignedUrl`. Plain `fetch` + timeout, mirrors
@@ -296,13 +343,36 @@ required documents — see `registration.service.js`'s `complete()`.
   plan needed — per Typebot's own docs, answers aren't saved and some of Typebot's own blocks like
   "Send email" are skipped) instead of `.../typebots/{publicId}/startChat`; flip to `false` and
   update `TYPEBOT_ID` to the real `publicId` once the bot is published. The app must still boot
-  fine with `TYPEBOT_ID` unset either way.
+  fine with `TYPEBOT_ID` unset either way. Current bot: `publicId = uday-updated-typebot-flow-42ihn4e`
+  (published, `TYPEBOT_PREVIEW_MODE=false`) — replaced the earlier `udaytypebot-fjy7b2y` bot when the
+  Studio flow was rebuilt. Only the **"(Individual) Author / Composer"** role path is complete in
+  this flow — the other 3 role choices ((NRI) Author/Composer, Owner/Publisher, (NRI)
+  Owner/Publisher) dead-end into informational text with zero further edges (no file-input block,
+  no continuation) and are explicitly future work; `progressMap.js` only covers the one live path.
 - `modules/conversation/services/typebot/typebotSessionStore.js` — in-memory
   `Map<userId, { sessionId, input }>`, mirrors `modules/auth/services/tokenBlacklist.js` (swap for
   Redis behind the same interface in a later milestone).
 - `modules/conversation/services/typebot/documentTypeMap.js` — maps a file-input block's
-  `variableId` to one of our document types (`PAN`/`AADHAAR`/`BANK`/...). Update this whenever a
-  file-input block's variable is added/renamed in the Typebot flow.
+  `variableId` to one of our document types (`PAN`/`BANK`/`PROFILE_PHOTO`/`NOC`/
+  `PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF`). Update this whenever a file-input block's
+  variable is added/renamed in the Typebot flow. `COMPANY_DOC` has no entry yet — that branch has
+  no working file-input block in Studio (dead-end, future work).
+- `modules/conversation/services/typebot/addressProofTypeMap.js` — the live flow replaced the old
+  dedicated Aadhaar upload with a generalized "address proof" flow, asked twice (permanent, then
+  current-only-if-different): the user picks a document type from a choice input (Passport /
+  Electricity Bill / Driving Licence / Voter ID / Letter from Property Owner), then uploads a file
+  into a *separate* variable (`permanent_address_proof` / `current_address_proof`) that doesn't
+  itself encode which type it is. This map recognizes the two type-choice blocks by `variableId`
+  and maps the answer text to an OCR doc type (`DRIVING_LICENCE`/`VOTER_ID`/`PASSPORT`/`ELECTRICITY`)
+  or `null` (only "Letter from Property Owner" has no OCR endpoint anywhere).
+  `registrationEngine.handle()` stashes the resolved type in
+  `typebotSessionStore` as `addressProofOcrType` when the type-choice question is answered, so the
+  paired file-upload (next turn) can read it back. `handleUpload()` passes it to
+  `registrationService.saveDocument()`'s new optional `ocrDocType` parameter, which runs OCR under
+  that type while still saving the DB row under the generic `PERMANENT_ADDRESS_PROOF`/
+  `CURRENT_ADDRESS_PROOF` caption. The session field is naturally overwritten (never explicitly
+  cleared) by the next `typebotSessionStore.set()` call regardless of path taken, so it can't leak
+  into an unrelated later upload.
 - `modules/conversation/services/typebot/conversationFieldMap.js` — same pattern as
   `documentTypeMap.js` but for plain text/choice answers: maps a block's `variableId` to an
   `AppAccounts` column. Currently maps GST no, alias/stage name, and email — confirmed live and
@@ -327,7 +397,8 @@ required documents — see `registration.service.js`'s `complete()`.
     Typebot's Studio no longer needs its own HTTP Request blocks for documents at all.
   - `POST /conversation/upload` is `multipart/form-data` (via `multer`, memory storage, limited by
     `MAX_UPLOAD_SIZE_MB`) — the only multipart endpoint in this app; everything else is JSON.
-  - **OCR-confirmation gate**: for OCR-eligible doc types (PAN/AADHAAR/BANK), `handleUpload()` does
+  - **OCR-confirmation gate**: for OCR-eligible doc types (PAN/AADHAAR/BANK, and address-proof
+    uploads routed to DRIVING_LICENCE/VOTER_ID via `addressProofTypeMap.js`), `handleUpload()` does
     *not* advance the conversation immediately after `saveDocument()`. If OCR extracted anything,
     it stores `{ ..., pendingDocConfirmation: { fileUrl } }` in `typebotSessionStore` and returns a
     message listing the extracted values (labeled per doc type — `OCR_FIELD_LABELS`, sourced from

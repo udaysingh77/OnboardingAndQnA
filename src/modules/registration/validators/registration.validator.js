@@ -18,7 +18,18 @@ export const registrationIdParamsSchema = z.object({
   params: registrationIdParam,
 });
 
-const documentTypeEnum = z.enum(['PAN', 'AADHAAR', 'BANK', 'NOC', 'COMPANY_DOC', 'PROFILE_PHOTO']);
+const documentTypeEnum = z.enum([
+  'PAN',
+  'AADHAAR',
+  'BANK',
+  'NOC',
+  'COMPANY_DOC',
+  'PROFILE_PHOTO',
+  'PERMANENT_ADDRESS_PROOF',
+  'CURRENT_ADDRESS_PROOF',
+  'DRIVING_LICENCE',
+  'VOTER_ID',
+]);
 
 export const documentUploadSchema = z.object({
   params: registrationIdParam.extend({ documentType: documentTypeEnum }),
