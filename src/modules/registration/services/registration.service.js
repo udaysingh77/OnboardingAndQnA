@@ -54,7 +54,7 @@ const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 
 // Fields conversationFieldMap.js is allowed to write to - keeps an arbitrary
 // mapped column name from being trusted blindly, even though the map only
 // ever contains these three today.
-const CONVERSATION_FIELDS = ['GSTNo', 'AccountAlias', 'AccountEmail'];
+const CONVERSATION_FIELDS = ['GSTNo', 'AccountAlias', 'AccountEmail', 'PlaceOfBirth', 'RollTypeIds', 'TeritoryAppFor'];
 
 const ocrProvider = createOcrProvider();
 
@@ -91,7 +91,7 @@ async function saveDocument(userId, registrationId, docType, documentUrl, ocrDoc
 
   const effectiveOcrType = ocrDocType ?? docType;
   const ocrResult = OCR_DOC_TYPES.includes(effectiveOcrType)
-    ? await runOcrAndPersist(registrationId, effectiveOcrType, documentUrl)
+    ? await runOcrAndPersist(registrationId, effectiveOcrType, documentUrl, docType)
     : null;
 
   // DocStatus: 0 = no OCR attempted (NOC/COMPANY_DOC/PROFILE_PHOTO), 1 = OCR-verified, 2 = OCR failed.
@@ -122,9 +122,23 @@ async function saveConversationField(userId, registrationId, field, value) {
   await registrationRepository.update(registrationId, update);
 }
 
+// OCR dates come back as "DD/MM/YYYY" strings (per the Document Verification API's documented
+// response shape, e.g. PAN's "dob": "01/01/1990") - JS's Date constructor assumes MM/DD/YYYY, so
+// parse explicitly. Returns undefined (skip the write) rather than throwing on an unparseable value.
+function parseOcrDate(value) {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(value ?? ''));
+  if (!match) return undefined;
+  const [, day, month, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 // A failed OCR extraction never fails the upload - the document still saves,
 // just flagged unverified (DocStatus = 2) so it can be reviewed manually.
-async function runOcrAndPersist(registrationId, docType, documentUrl) {
+// `addressSlot` is the original docType saveDocument() was called with, before any ocrDocType
+// override - lets an address-proof upload's extracted address be routed to the right column
+// (PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF), independent of which OCR type actually ran.
+async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlot) {
   try {
     const extracted = await ocrProvider.extract({ docType, documentUrl });
 
@@ -140,6 +154,25 @@ async function runOcrAndPersist(registrationId, docType, documentUrl) {
       if (Object.keys(bankUpdate).length > 0) {
         await registrationRepository.update(registrationId, bankUpdate);
       }
+    }
+
+    if (extracted.address && addressSlot === DOC_TYPES.PERMANENT_ADDRESS_PROOF) {
+      await registrationRepository.update(registrationId, { AccountAddress: extracted.address });
+    } else if (extracted.address && addressSlot === DOC_TYPES.CURRENT_ADDRESS_PROOF) {
+      await registrationRepository.update(registrationId, { AccountAddress_PR: extracted.address });
+    }
+
+    // Whichever doc type happens to extract these - PAN/Passport for dob, Aadhaar/Voter ID for
+    // gender - opportunistically persisted the same way address is above.
+    const dob = parseOcrDate(extracted.dob);
+    if (dob) {
+      await registrationRepository.update(registrationId, { DOB: dob });
+    }
+    if (extracted.gender) {
+      await registrationRepository.update(registrationId, { Gender: extracted.gender });
+    }
+    if (docType === DOC_TYPES.PASSPORT && extracted.nationality) {
+      await registrationRepository.update(registrationId, { Nationality: extracted.nationality });
     }
 
     // Aadhaar's extracted number/name/dob/gender/address are intentionally not

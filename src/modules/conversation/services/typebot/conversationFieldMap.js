@@ -12,6 +12,9 @@ export const ACCOUNT_FIELD_BY_VARIABLE_ID = {
   vqpmuqooo8wn2ktrfx9uf4l1j: 'GSTNo', // GST no
   vixob6tfcj9w3m44slwh3p1kq: 'AccountAlias', // alias / stage name
   virpfcnue17syf7ua2hbuj5d1: 'AccountEmail', // email input
+  vfvvwcz6g7ueiw2lhqnwvg9z: 'PlaceOfBirth', // place of birth
+  vcf06ka3xjtg0u940pk0qd7os: 'RollTypeIds', // role: lyricist / composer / both
+  vufrpq6qr5rpcbewbffajjb73: 'TeritoryAppFor', // territory applied for (INDIA/WORLD)
 };
 
 export function resolveConversationField(variableId) {

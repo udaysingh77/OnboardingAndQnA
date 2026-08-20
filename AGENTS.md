@@ -222,9 +222,44 @@ are shared production data (`Dreamsoft_UAT`) whose usage elsewhere is unverified
 a mapping for these. These answers live only in Typebot's own result store, not in this DB, until a
 real column/mapping is confirmed.
 
-**GST number, stage name/alias, and email** *are* persisted (via `conversationFieldMap.js` +
+**GST number, stage name/alias, email, place of birth, role (lyricist/composer/both), and territory
+applied for (INDIA/WORLD)** *are* persisted (via `conversationFieldMap.js` +
 `registrationService.saveConversationField()`, see "Conversation Router" below) — `GSTNo` (new
-column, added the same way `PANNo` was) and the existing `AccountAlias`/`AccountEmail` columns.
+column, added the same way `PANNo` was) and the existing
+`AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor` columns. Territory
+initially had no `options.variableId` set in Studio at all (Typebot only branched on it, never
+stored it to a variable) — the user assigned it a variable and republished, confirmed live via the
+builder API (`variableId = vufrpq6qr5rpcbewbffajjb73`), then it was wired the same way as every
+other `conversationFieldMap.js` entry.
+
+**DOB, Gender, and Nationality from OCR** are also now persisted, alongside `PANNo`/bank fields/address
+in `runOcrAndPersist()`: `DOB` (from whichever doc type's OCR happens to include `extracted.dob` -
+PAN or Passport - parsed from the API's `DD/MM/YYYY` string format via a small `parseOcrDate()`
+helper, since `Date`'s constructor assumes `MM/DD/YYYY`), `Gender` (from Aadhaar/Voter ID's
+`extracted.gender`), `Nationality` (Passport-only, `extracted.nationality`). All three follow the
+same "opportunistic, whichever OCR call produced it" pattern as `address` above, and the same
+"never let a bad value break the upload" guarantee (`parseOcrDate()` returns `undefined` — skipping
+the write — on anything that doesn't match `DD/MM/YYYY`, rather than throwing).
+
+**Deliberately NOT wired** (audited but rejected — don't re-propose without new information): the
+top-level "(Individual) Author/Composer" vs the other 3 dead-end role choices (only this branch
+ever completes registration, so there's no real variance to persist); both consent gates
+(fraud-caution + data-consent — only one `Consent`/`ConsentDate` column pair exists for two
+distinct consents); `SocietyId` (BigInt FK, semantically wrong for the "member of another society?"
+yes/no answer); Spotify URL (no real matching column); OCR `name`/`fatherOrHusbandName` (real
+overwrite/semantic risk - `name` could clobber `AccountName` with OCR-formatted text, and
+`fatherOrHusbandName` can legitimately be a husband's name for married women voters, not a father's);
+bank OCR's `city`/`state`, EPIC number, driving-licence number, passport number (no matching column
+exists at all for any of these).
+
+**Address-proof OCR's extracted `address`** (from Driving Licence/Voter ID/Electricity Bill - the 3
+address-proof types with an `address` field, see `OCR_FIELD_LABELS`) is now persisted too, unlike
+every other extracted field: `runOcrAndPersist()` takes a 4th param, `addressSlot` (the original
+`docType` `saveDocument()` was called with, before any `ocrDocType` override — i.e.
+`PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF`), and writes to `AccountAddress` (permanent) or
+`AccountAddress_PR` (current) accordingly. This mapping (base column = Permanent, `_PR` suffix =
+Current) was user-confirmed, not derived from any column comment — the columns' real semantics
+outside this app are otherwise unverified, same caveat as `Detail1`-`Detail12` below.
 
 **Confirmed `Detail1`/`Detail2`/`Detail10` mapping** (user-provided, unlike the rest of
 `Detail1`–`Detail12` which stay unmapped): `Detail1` gets a duplicate write of the GST number
