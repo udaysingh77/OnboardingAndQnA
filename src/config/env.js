@@ -38,7 +38,11 @@ const envSchema = z.object({
   /* SMTP (Nodemailer) */
   SMTP_HOST: z.string().default('smtp.gmail.com'),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
-  SMTP_SECURE: z.coerce.boolean().default(false),
+  // z.coerce.boolean() would treat the string "false" as truthy - compare explicitly.
+  SMTP_SECURE: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
 

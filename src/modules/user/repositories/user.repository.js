@@ -25,10 +25,25 @@ function update(accountId, data) {
   return prisma.appAccounts.update({ where: { AccountId: BigInt(accountId) }, data });
 }
 
+function findByPhone(phone) {
+  return findByAccountMobile(phone);
+}
+
+async function existsByPhone(phone) {
+  const found = await prisma.appAccounts.findFirst({
+    where: { AccountMobile: phone },
+    select: { AccountId: true },
+  });
+
+  return Boolean(found);
+}
+
 export const userRepository = {
   create,
   findById,
   findByAccountMobile,
+  findByPhone,
+  existsByPhone,
   findByEmail,
   update,
 };
