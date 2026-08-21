@@ -125,7 +125,7 @@ const EMAIL_OTP_INPUT = { id: 'email-otp-verification', type: 'text input', opti
 
 function isResendKeyword(message) {
   const normalized = String(message ?? '').trim().toLowerCase();
-  return normalized === 'resend' || normalized === 'resend otp';
+  return ['resend', 'resend otp', 'resend the otp', 'send otp again', 'send again', 'new otp'].includes(normalized);
 }
 
 /**
@@ -202,7 +202,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     } catch (err) {
       return {
         sessionEnded: false,
-        messages: [textMessage('email-otp-invalid', err.message)],
+        messages: [textMessage('email-otp-invalid', `${err.message} Type "resend" to get a new OTP.`)],
         input: EMAIL_OTP_INPUT,
         progress: resolveProgress(existing.input.id),
       };
@@ -336,6 +336,9 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     // handleUpload() to decide OCR routing (see addressProofTypeMap.js).
     if (isAddressProofTypeStep(existing.input.options?.variableId)) {
       addressProofOcrType = resolveAddressProofOcrType(message);
+      if (addressProofOcrType === null) {
+        logger.warn({ userId, message }, 'Address-proof type answer did not resolve to an OCR type');
+      }
     }
   }
 
@@ -417,6 +420,9 @@ export async function handleUpload({ userId, token, file }) {
   // which isn't in OCR_DOC_TYPES, so OCR is correctly skipped.
   const isAddressProofUpload = docType === 'PERMANENT_ADDRESS_PROOF' || docType === 'CURRENT_ADDRESS_PROOF';
   const ocrDocType = isAddressProofUpload ? session.addressProofOcrType : undefined;
+  if (isAddressProofUpload && ocrDocType == null) {
+    logger.warn({ userId, docType }, 'Address-proof upload has no OCR type recorded in session - OCR will be skipped');
+  }
 
   let result = null;
   if (docType) {

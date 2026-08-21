@@ -222,9 +222,54 @@ are shared production data (`Dreamsoft_UAT`) whose usage elsewhere is unverified
 a mapping for these. These answers live only in Typebot's own result store, not in this DB, until a
 real column/mapping is confirmed.
 
-**GST number, stage name/alias, and email** *are* persisted (via `conversationFieldMap.js` +
+**GST number, stage name/alias, email, place of birth, role (lyricist/composer/both), and territory
+applied for (INDIA/WORLD)** *are* persisted (via `conversationFieldMap.js` +
 `registrationService.saveConversationField()`, see "Conversation Router" below) — `GSTNo` (new
-column, added the same way `PANNo` was) and the existing `AccountAlias`/`AccountEmail` columns.
+column, added the same way `PANNo` was) and the existing
+`AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor` columns. Territory
+initially had no `options.variableId` set in Studio at all (Typebot only branched on it, never
+stored it to a variable) — the user assigned it a variable and republished, confirmed live via the
+builder API (`variableId = vufrpq6qr5rpcbewbffajjb73`), then it was wired the same way as every
+other `conversationFieldMap.js` entry.
+
+**Bug found and fixed**: `PlaceOfBirth`'s key was `vfvvwcz6g7ueiw2lhqnwvg9z` — which turned out to
+be the **block id** of the "Please enter your place of birth" text-input block, not its
+`options.variableId` (`vy80zc5eoveac6euqlurki58o`, confirmed via the builder API). Since
+`resolveConversationField()` matches against `input.options.variableId`, not the block id, this
+entry never matched anything and the field was never persisted — in any session, since it was first
+added. Fixed by correcting the key. **Every `conversationFieldMap.js`/`addressProofTypeMap.js`
+entry must be verified against `options.variableId` specifically** (fetch the live published flow
+via the builder API and check the block's `options.variableId`, not its `id` or any other field) —
+a block id and a variableId can look superficially similar and this exact mixup is easy to repeat.
+
+**DOB, Gender, and Nationality from OCR** are also now persisted, alongside `PANNo`/bank fields/address
+in `runOcrAndPersist()`: `DOB` (from whichever doc type's OCR happens to include `extracted.dob` -
+PAN or Passport - parsed from the API's `DD/MM/YYYY` string format via a small `parseOcrDate()`
+helper, since `Date`'s constructor assumes `MM/DD/YYYY`), `Gender` (from Aadhaar/Voter ID's
+`extracted.gender`), `Nationality` (Passport-only, `extracted.nationality`). All three follow the
+same "opportunistic, whichever OCR call produced it" pattern as `address` above, and the same
+"never let a bad value break the upload" guarantee (`parseOcrDate()` returns `undefined` — skipping
+the write — on anything that doesn't match `DD/MM/YYYY`, rather than throwing).
+
+**Deliberately NOT wired** (audited but rejected — don't re-propose without new information): the
+top-level "(Individual) Author/Composer" vs the other 3 dead-end role choices (only this branch
+ever completes registration, so there's no real variance to persist); both consent gates
+(fraud-caution + data-consent — only one `Consent`/`ConsentDate` column pair exists for two
+distinct consents); `SocietyId` (BigInt FK, semantically wrong for the "member of another society?"
+yes/no answer); Spotify URL (no real matching column); OCR `name`/`fatherOrHusbandName` (real
+overwrite/semantic risk - `name` could clobber `AccountName` with OCR-formatted text, and
+`fatherOrHusbandName` can legitimately be a husband's name for married women voters, not a father's);
+bank OCR's `city`/`state`, EPIC number, driving-licence number, passport number (no matching column
+exists at all for any of these).
+
+**Address-proof OCR's extracted `address`** (from Driving Licence/Voter ID/Electricity Bill - the 3
+address-proof types with an `address` field, see `OCR_FIELD_LABELS`) is now persisted too, unlike
+every other extracted field: `runOcrAndPersist()` takes a 4th param, `addressSlot` (the original
+`docType` `saveDocument()` was called with, before any `ocrDocType` override — i.e.
+`PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF`), and writes to `AccountAddress` (permanent) or
+`AccountAddress_PR` (current) accordingly. This mapping (base column = Permanent, `_PR` suffix =
+Current) was user-confirmed, not derived from any column comment — the columns' real semantics
+outside this app are otherwise unverified, same caveat as `Detail1`-`Detail12` below.
 
 **Confirmed `Detail1`/`Detail2`/`Detail10` mapping** (user-provided, unlike the rest of
 `Detail1`–`Detail12` which stay unmapped): `Detail1` gets a duplicate write of the GST number
@@ -373,6 +418,28 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
   `CURRENT_ADDRESS_PROOF` caption. The session field is naturally overwritten (never explicitly
   cleared) by the next `typebotSessionStore.set()` call regardless of path taken, so it can't leak
   into an unrelated later upload.
+
+  **Bug found and fixed**: `OCR_TYPE_BY_ANSWER`'s key was `'electricity bill'`, but the live
+  button's actual text (confirmed via the builder API) is `"Electricity/Light Bill"` — the
+  lowercased answer never matched, so `resolveAddressProofOcrType()` silently returned `null` for
+  every Electricity Bill selection, which made `saveDocument()` fall back to the generic
+  `PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF` type (not in `OCR_DOC_TYPES`), skipping OCR
+  entirely with no error and no confirmation prompt — just a silent advance to the next question.
+  Fixed by correcting the key to `'electricity/light bill'`. **Always re-verify a live button's
+  exact text via the builder API before hardcoding it here** — this is the second time in this
+  project a hardcoded guess at Typebot's exact wording has been wrong (see the OCR transport-contract
+  flip-flops above for a similar "don't trust a past assumption, re-probe live" lesson).
+
+  Directly verified `VOTER_ID` does **not** have this bug: calling `saveDocument()` with
+  `ocrDocType: 'VOTER_ID'` against a real test account correctly ran OCR against the `voter-id`
+  endpoint and returned a result with an `extracted` key (so `handleUpload()`'s confirmation gate
+  *would* fire). If a user still reports a fully silent Voter ID upload after this fix, the bug is
+  further upstream — most likely `session.addressProofOcrType` not surviving from the type-choice
+  answer turn to the paired upload turn during the real conversation — not in `saveDocument()` or
+  the OCR routing itself. Two `logger.warn()` calls were added specifically to catch this: one in
+  `handle()` when `resolveAddressProofOcrType()` returns `null` for a type-choice answer, one in
+  `handleUpload()` when an address-proof upload has no `ocrDocType` recorded in its session. Check
+  these on the next live report before re-investigating from scratch.
 - `modules/conversation/services/typebot/conversationFieldMap.js` — same pattern as
   `documentTypeMap.js` but for plain text/choice answers: maps a block's `variableId` to an
   `AppAccounts` column. Currently maps GST no, alias/stage name, and email — confirmed live and
@@ -478,14 +545,20 @@ sub-conversation, tracked via a new `pendingEmailVerification: { email }` field 
 - A fresh answer to the email question (format-checked first) triggers `sendVerificationOtp()` and
   replaces the real input with a synthetic `EMAIL_OTP_INPUT` block (non-Typebot, Studio needs no
   changes — same pattern as `OCR_CONFIRM_CHOICE_INPUT`) asking for the OTP.
-- `handle()` checks `pendingEmailVerification` before anything else on the next turn: typing
-  `resend`/`resend otp` re-sends a fresh OTP (the service's own cooldown throws its own message if
-  spammed); anything else is treated as the OTP itself. A wrong/expired/maxed-out OTP returns
-  `verifyEmailOtp()`'s own error message and re-shows `EMAIL_OTP_INPUT` — the conversation never
-  reaches Typebot's `continueChat` until verification succeeds. A correct OTP clears
-  `pendingEmailVerification` and replays the turn as if the user had just answered the email
-  question correctly, so the normal relay/persist path (`resolveConversationField` → `AccountEmail`)
-  runs unchanged.
+- `handle()` checks `pendingEmailVerification` before anything else on the next turn: typing one of
+  `isResendKeyword()`'s recognized phrases (`resend`, `resend otp`, `resend the otp`, `send otp
+  again`, `send again`, `new otp`) re-sends a fresh OTP (the service's own cooldown throws its own
+  message if spammed); anything else is treated as the OTP itself. A wrong OTP now returns
+  `verifyEmailOtp()`'s message **with a remaining-attempts count** ("Invalid OTP. N attempts
+  left.", `details: { attemptsRemaining }`) computed in `emailOtp.service.js`. Every
+  wrong/expired/maxed-out response — not just the initial send — also has a `'Type "resend" to get
+  a new OTP.'` hint appended in `registrationEngine.js`, so resend stays discoverable through
+  repeated wrong guesses and especially right after max-attempts lockout (where the record is
+  invalidated server-side and further digit-entry alone would just repeat "OTP not found..." with
+  no way out otherwise). The conversation never reaches Typebot's `continueChat` until verification
+  succeeds. A correct OTP clears `pendingEmailVerification` and replays the turn as if the user had
+  just answered the email question correctly, so the normal relay/persist path
+  (`resolveConversationField` → `AccountEmail`) runs unchanged.
 
 **Setup**: `Email_Verification_Otp` needed an explicit `npx prisma db push` (+ `prisma generate`) —
 it wasn't created by the `email` branch merge alone. `SMTP_USER`/`SMTP_PASSWORD` are optional in
