@@ -10,7 +10,6 @@ function getTransport() {
 
   const opts = createSmtpOptions();
 
-  console.log('SMTP options:', opts); // Log SMTP options for debugging
   transport = nodemailer.createTransport(opts);
 
   // Verify connection configuration lazily (don't throw at import time)
@@ -44,9 +43,10 @@ export function createSmtpOptions() {
   return {
     host: env.SMTP_HOST,
     port: Number(env.SMTP_PORT),
-    secure: !Boolean(env.SMTP_SECURE),
+    // 465 = implicit TLS (secure true); 587 = STARTTLS (secure false + requireTLS)
+    secure: env.SMTP_SECURE,
     auth: env.SMTP_USER && env.SMTP_PASSWORD ? { user: env.SMTP_USER, pass: env.SMTP_PASSWORD } : undefined,
-    requireTLS: !Boolean(env.SMTP_SECURE),
+    requireTLS: !env.SMTP_SECURE,
     tls: { rejectUnauthorized: env.isProd },
     connectionTimeout: 10_000,
   };
