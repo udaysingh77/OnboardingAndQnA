@@ -232,6 +232,16 @@ stored it to a variable) — the user assigned it a variable and republished, co
 builder API (`variableId = vufrpq6qr5rpcbewbffajjb73`), then it was wired the same way as every
 other `conversationFieldMap.js` entry.
 
+**Bug found and fixed**: `PlaceOfBirth`'s key was `vfvvwcz6g7ueiw2lhqnwvg9z` — which turned out to
+be the **block id** of the "Please enter your place of birth" text-input block, not its
+`options.variableId` (`vy80zc5eoveac6euqlurki58o`, confirmed via the builder API). Since
+`resolveConversationField()` matches against `input.options.variableId`, not the block id, this
+entry never matched anything and the field was never persisted — in any session, since it was first
+added. Fixed by correcting the key. **Every `conversationFieldMap.js`/`addressProofTypeMap.js`
+entry must be verified against `options.variableId` specifically** (fetch the live published flow
+via the builder API and check the block's `options.variableId`, not its `id` or any other field) —
+a block id and a variableId can look superficially similar and this exact mixup is easy to repeat.
+
 **DOB, Gender, and Nationality from OCR** are also now persisted, alongside `PANNo`/bank fields/address
 in `runOcrAndPersist()`: `DOB` (from whichever doc type's OCR happens to include `extracted.dob` -
 PAN or Passport - parsed from the API's `DD/MM/YYYY` string format via a small `parseOcrDate()`
@@ -408,6 +418,28 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
   `CURRENT_ADDRESS_PROOF` caption. The session field is naturally overwritten (never explicitly
   cleared) by the next `typebotSessionStore.set()` call regardless of path taken, so it can't leak
   into an unrelated later upload.
+
+  **Bug found and fixed**: `OCR_TYPE_BY_ANSWER`'s key was `'electricity bill'`, but the live
+  button's actual text (confirmed via the builder API) is `"Electricity/Light Bill"` — the
+  lowercased answer never matched, so `resolveAddressProofOcrType()` silently returned `null` for
+  every Electricity Bill selection, which made `saveDocument()` fall back to the generic
+  `PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF` type (not in `OCR_DOC_TYPES`), skipping OCR
+  entirely with no error and no confirmation prompt — just a silent advance to the next question.
+  Fixed by correcting the key to `'electricity/light bill'`. **Always re-verify a live button's
+  exact text via the builder API before hardcoding it here** — this is the second time in this
+  project a hardcoded guess at Typebot's exact wording has been wrong (see the OCR transport-contract
+  flip-flops above for a similar "don't trust a past assumption, re-probe live" lesson).
+
+  Directly verified `VOTER_ID` does **not** have this bug: calling `saveDocument()` with
+  `ocrDocType: 'VOTER_ID'` against a real test account correctly ran OCR against the `voter-id`
+  endpoint and returned a result with an `extracted` key (so `handleUpload()`'s confirmation gate
+  *would* fire). If a user still reports a fully silent Voter ID upload after this fix, the bug is
+  further upstream — most likely `session.addressProofOcrType` not surviving from the type-choice
+  answer turn to the paired upload turn during the real conversation — not in `saveDocument()` or
+  the OCR routing itself. Two `logger.warn()` calls were added specifically to catch this: one in
+  `handle()` when `resolveAddressProofOcrType()` returns `null` for a type-choice answer, one in
+  `handleUpload()` when an address-proof upload has no `ocrDocType` recorded in its session. Check
+  these on the next live report before re-investigating from scratch.
 - `modules/conversation/services/typebot/conversationFieldMap.js` — same pattern as
   `documentTypeMap.js` but for plain text/choice answers: maps a block's `variableId` to an
   `AppAccounts` column. Currently maps GST no, alias/stage name, and email — confirmed live and
@@ -513,14 +545,20 @@ sub-conversation, tracked via a new `pendingEmailVerification: { email }` field 
 - A fresh answer to the email question (format-checked first) triggers `sendVerificationOtp()` and
   replaces the real input with a synthetic `EMAIL_OTP_INPUT` block (non-Typebot, Studio needs no
   changes — same pattern as `OCR_CONFIRM_CHOICE_INPUT`) asking for the OTP.
-- `handle()` checks `pendingEmailVerification` before anything else on the next turn: typing
-  `resend`/`resend otp` re-sends a fresh OTP (the service's own cooldown throws its own message if
-  spammed); anything else is treated as the OTP itself. A wrong/expired/maxed-out OTP returns
-  `verifyEmailOtp()`'s own error message and re-shows `EMAIL_OTP_INPUT` — the conversation never
-  reaches Typebot's `continueChat` until verification succeeds. A correct OTP clears
-  `pendingEmailVerification` and replays the turn as if the user had just answered the email
-  question correctly, so the normal relay/persist path (`resolveConversationField` → `AccountEmail`)
-  runs unchanged.
+- `handle()` checks `pendingEmailVerification` before anything else on the next turn: typing one of
+  `isResendKeyword()`'s recognized phrases (`resend`, `resend otp`, `resend the otp`, `send otp
+  again`, `send again`, `new otp`) re-sends a fresh OTP (the service's own cooldown throws its own
+  message if spammed); anything else is treated as the OTP itself. A wrong OTP now returns
+  `verifyEmailOtp()`'s message **with a remaining-attempts count** ("Invalid OTP. N attempts
+  left.", `details: { attemptsRemaining }`) computed in `emailOtp.service.js`. Every
+  wrong/expired/maxed-out response — not just the initial send — also has a `'Type "resend" to get
+  a new OTP.'` hint appended in `registrationEngine.js`, so resend stays discoverable through
+  repeated wrong guesses and especially right after max-attempts lockout (where the record is
+  invalidated server-side and further digit-entry alone would just repeat "OTP not found..." with
+  no way out otherwise). The conversation never reaches Typebot's `continueChat` until verification
+  succeeds. A correct OTP clears `pendingEmailVerification` and replays the turn as if the user had
+  just answered the email question correctly, so the normal relay/persist path
+  (`resolveConversationField` → `AccountEmail`) runs unchanged.
 
 **Setup**: `Email_Verification_Otp` needed an explicit `npx prisma db push` (+ `prisma generate`) —
 it wasn't created by the `email` branch merge alone. `SMTP_USER`/`SMTP_PASSWORD` are optional in

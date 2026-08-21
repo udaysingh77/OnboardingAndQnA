@@ -24,7 +24,9 @@ const OCR_TYPE_BY_ANSWER = {
   'driving licence': 'DRIVING_LICENCE',
   'voter id': 'VOTER_ID',
   passport: 'PASSPORT',
-  'electricity bill': 'ELECTRICITY',
+  // Live button text is "Electricity/Light Bill" (confirmed via the builder API), not
+  // "Electricity Bill" - a stale guess here silently skipped OCR for every real selection.
+  'electricity/light bill': 'ELECTRICITY',
 };
 
 export function isAddressProofTypeStep(variableId) {

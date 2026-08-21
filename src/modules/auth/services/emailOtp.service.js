@@ -99,7 +99,10 @@ export function createEmailOtpService({ db = prisma, mailer = sendEmail, cfg = e
         await db.emailVerificationOtp.update({ where: { id: record.id }, data: { expiresAt: now } });
         throw badRequestError('Maximum OTP verification attempts exceeded. Please request a new OTP.');
       }
-      throw badRequestError('Invalid OTP');
+      const remaining = maxAttempts - updated.attempts;
+      throw badRequestError(`Invalid OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} left.`, {
+        details: { attemptsRemaining: remaining },
+      });
     }
 
     // mark verified
