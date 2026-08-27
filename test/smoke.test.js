@@ -195,10 +195,10 @@ test('Registration flow: documents -> complete', async (t) => {
 
   // documents - PAN/BANK/PERMANENT_ADDRESS_PROOF are what complete() now requires (the live chat
   // flow's actual mandatory set), plus AADHAAR (no longer required, but still a valid OCR'd type -
-  // exercises that code path) and PROFILE_PHOTO (now OCR'd via the passport-photo endpoint).
-  // The fake s3.example.com URLs can't be OCR'd for real, so these are expected to come back
-  // unverified rather than fail the upload - that graceful-degradation path is the point here.
-  const OCR_TYPES = new Set(['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO']);
+  // exercises that code path) and PROFILE_PHOTO (never OCR'd).
+  // The fake s3.example.com URLs can't be OCR'd for real, so PAN/AADHAAR/BANK are expected to come
+  // back unverified rather than fail the upload - that graceful-degradation path is the point here.
+  const OCR_TYPES = new Set(['PAN', 'AADHAAR', 'BANK']);
   for (const type of ['PAN', 'AADHAAR', 'BANK', 'PROFILE_PHOTO', 'PERMANENT_ADDRESS_PROOF']) {
     const res = await fetch(`${baseUrl}/registration/${registrationId}/documents/${type}`, {
       method: 'POST',

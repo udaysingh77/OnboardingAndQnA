@@ -287,14 +287,15 @@ Every new service function additionally calls `assertOwnRegistration(userId, reg
 (in `registration.service.js`), which 403s if the path param doesn't match `req.user.id` — the id
 alone is never sufficient to touch another user's registration.
 
-**OCR**: implemented for `PAN`/`AADHAAR`/`BANK`/`DRIVING_LICENCE`/`VOTER_ID`/`PASSPORT`/`ELECTRICITY`/`PROFILE_PHOTO`
-(`PROFILE_PHOTO` via the `passport-photo` endpoint - face detection + photo-quality checks) —
-`NOC`/`COMPANY_DOC` never trigger OCR, they just save. `PROFILE_PHOTO`'s response shape differs from
-every other doc type (nested `document.status`/`extractedData.faceCount`, no top-level `isValid`) -
-`runOcrAndPersist()` special-cases it (`extracted.document?.status === 'VALID'`) and
-`OCR_FIELD_LABELS.PROFILE_PHOTO` in `registrationEngine.js` uses dotted-path keys, resolved by a
-small `getPath()` helper `buildOcrConfirmationMessages()` now uses instead of a flat `extracted?.[key]`
-lookup. `society-noc` was deliberately **not** wired: its consistency check needs
+**OCR**: implemented for `PAN`/`AADHAAR`/`BANK`/`DRIVING_LICENCE`/`VOTER_ID`/`PASSPORT`/`ELECTRICITY`
+— `NOC`/`COMPANY_DOC`/`PROFILE_PHOTO` never trigger OCR, they just save. `PROFILE_PHOTO` was briefly
+wired to the `passport-photo` endpoint (face detection + photo-quality checks) but that endpoint
+stopped working and the wiring was reverted — `OCR_DOC_TYPES` no longer includes it,
+`DOC_TYPE_PATHS` in `httpOcrProvider.js` has no `PROFILE_PHOTO` entry, and
+`buildOcrConfirmationMessages()` is back to a flat `extracted?.[key]` lookup (the dotted-path
+`getPath()` helper it briefly needed was removed along with the `OCR_FIELD_LABELS.PROFILE_PHOTO`
+entry that was its only consumer). `society-noc` was deliberately **not** wired: its consistency
+check needs
 `applicantName`/`societyName`/`flatNumber`, and neither `societyName` nor `flatNumber` exists
 anywhere in this codebase (no `AppAccounts` column, no Typebot question) - also unclear whether the
 flow's "NOC" upload step is even a housing-society NOC. `PASSPORT`/`ELECTRICITY`'s

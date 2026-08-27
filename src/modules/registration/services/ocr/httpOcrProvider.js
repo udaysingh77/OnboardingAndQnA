@@ -23,7 +23,6 @@ const DOC_TYPE_PATHS = {
   VOTER_ID: 'voter-id',
   PASSPORT: 'passport',
   ELECTRICITY: 'electricity',
-  PROFILE_PHOTO: 'passport-photo',
 };
 
 export function createHttpOcrProvider() {

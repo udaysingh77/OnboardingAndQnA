@@ -37,7 +37,9 @@ const DOC_TYPES = Object.freeze({
 // conditional/optional in the flow. PERMANENT_ADDRESS_PROOF replaces AADHAAR as the mandatory
 // address-proof step - the live flow never asks for Aadhaar specifically anymore.
 const REQUIRED_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.BANK, DOC_TYPES.PERMANENT_ADDRESS_PROOF];
-// OCR runs for these - NOC/company docs/address-proof-with-an-unsupported-type are saved as-is.
+// OCR runs for these - NOC/company docs/profile photos/address-proof-with-an-unsupported-type are
+// saved as-is. PROFILE_PHOTO's passport-photo endpoint was briefly wired in but is not currently
+// working - reverted, see AGENTS.md.
 const OCR_DOC_TYPES = [
   DOC_TYPES.PAN,
   DOC_TYPES.AADHAAR,
@@ -46,7 +48,6 @@ const OCR_DOC_TYPES = [
   DOC_TYPES.VOTER_ID,
   DOC_TYPES.PASSPORT,
   DOC_TYPES.ELECTRICITY,
-  DOC_TYPES.PROFILE_PHOTO,
 ];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
@@ -177,13 +178,7 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
 
     // Aadhaar's extracted number/name/dob/gender/address are intentionally not
     // persisted to AppAccounts - only used here to compute `verified`.
-    // PROFILE_PHOTO (passport-photo endpoint) has a different response shape - no top-level
-    // isValid, instead a nested document.status of VALID/REVIEW/INVALID.
-    const verified = docType === DOC_TYPES.PROFILE_PHOTO
-      ? extracted.document?.status === 'VALID'
-      : Boolean(extracted.isValid);
-
-    return { verified, extracted };
+    return { verified: Boolean(extracted.isValid), extracted };
   } catch (err) {
     logger.warn(
       { registrationId, docType, stage: err.details?.stage, details: err.details, err },
