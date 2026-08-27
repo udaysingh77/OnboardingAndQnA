@@ -71,17 +71,7 @@ const OCR_FIELD_LABELS = {
   },
   // Same caveat as PASSPORT - collection only documents "Bill name + address".
   ELECTRICITY: { name: 'Name', address: 'Address' },
-  // passport-photo's response shape is confirmed (nested under document/extractedData, not flat
-  // top-level keys like every other doc type) - buildOcrConfirmationMessages resolves dotted paths.
-  PROFILE_PHOTO: {
-    'document.status': 'Status',
-    'extractedData.faceCount': 'Faces Detected',
-  },
 };
-
-function getPath(obj, path) {
-  return path.split('.').reduce((value, key) => value?.[key], obj);
-}
 
 function isAffirmative(message) {
   const normalized = String(message ?? '').trim().toLowerCase();
@@ -99,7 +89,7 @@ function textMessage(id, text) {
 function buildOcrConfirmationMessages(docType, extracted) {
   const labels = OCR_FIELD_LABELS[docType] ?? {};
   const lines = Object.entries(labels)
-    .map(([key, label]) => [label, getPath(extracted, key)])
+    .map(([key, label]) => [label, extracted?.[key]])
     .filter(([, value]) => value != null && value !== '')
     .map(([label, value]) => `${label}: ${value}`);
 
