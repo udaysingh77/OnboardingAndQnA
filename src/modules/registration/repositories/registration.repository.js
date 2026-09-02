@@ -10,6 +10,34 @@ function findByAccountId(accountId) {
   return prisma.appAccounts.findUnique({ where: { AccountId: BigInt(accountId) } });
 }
 
+function findAliasesByAccountId(accountId) {
+  return prisma.appAccountsAlias.findMany({
+    where: { AccountId: BigInt(accountId) },
+    orderBy: { AliasId: 'asc' },
+  });
+}
+
+// One at a time, ignoring the unique-index violation, rather than createMany: Prisma's
+// `skipDuplicates` is not supported on SQL Server. At most a handful of names per call, so the extra
+// round-trips are irrelevant, and letting the (AccountId, AliasName) index be the arbiter means a
+// name arriving twice at once still can't be stored twice. Returns how many were newly inserted.
+async function createAliases(accountId, names, source) {
+  let count = 0;
+
+  for (const AliasName of names) {
+    try {
+      await prisma.appAccountsAlias.create({
+        data: { AccountId: BigInt(accountId), AliasName, Source: source },
+      });
+      count += 1;
+    } catch (err) {
+      if (err?.code !== 'P2002') throw err; // already stored for this member - not an error
+    }
+  }
+
+  return { count };
+}
+
 // Emails are stored lowercase (see saveConversationField), so the caller passes an already
 // normalized value. findFirst rather than findUnique: the uniqueness lives in a filtered index that
 // Prisma's schema can't express, so the client doesn't know the column is unique.
@@ -64,6 +92,8 @@ function findDocumentsByAccountId(accountId) {
 export const registrationRepository = {
   findByAccountId,
   findByAccountEmail,
+  findAliasesByAccountId,
+  createAliases,
   markCompleted,
   update,
   upsertDocument,

@@ -177,63 +177,42 @@ async function fetchSpotifyResource(url) {
   return response.json();
 }
 
-async function fetchArtistResource(artistId) {
-  const url = `${SPOTIFY_API_BASE}/artists/${artistId}`;
-  return fetchSpotifyResource(url);
-}
-
-async function enrichArtist(artist) {
-  if (!artist?.id) {
-    return {
-      id: artist.id,
-      name: artist.name,
-      type: artist.type,
-      uri: artist.uri,
-      href: artist.href,
-      external_urls: artist.external_urls ?? null,
-      genres: artist.genres ?? [],
-      popularity: artist.popularity ?? null,
-      followers: artist.followers ?? null,
-      images: artist.images ?? [],
-      roles: Array.isArray(artist.roles) ? artist.roles : [],
-    };
-  }
-
-  const hasArtistDetails = Array.isArray(artist.genres) && Array.isArray(artist.images) && typeof artist.popularity === 'number';
-  if (hasArtistDetails) {
-    return {
-      id: artist.id,
-      name: artist.name,
-      type: artist.type,
-      uri: artist.uri,
-      href: artist.href,
-      external_urls: artist.external_urls ?? null,
-      genres: artist.genres ?? [],
-      popularity: artist.popularity ?? null,
-      followers: artist.followers?.total ?? null,
-      images: artist.images ?? [],
-      roles: Array.isArray(artist.roles) ? artist.roles : [],
-    };
-  }
-
-  const details = await fetchArtistResource(artist.id);
+// The artist objects inside a track response carry id/name/uri/external_urls and nothing else.
+// This used to fetch /v1/artists/{id} for *every* artist to add genres/followers/popularity - but
+// this app's Spotify tier no longer returns any of those three (verified live: /v1/artists returns
+// only id, name, images, uri, external_urls), so those N extra HTTP calls bought a thumbnail. The
+// artist *names* - the only thing the credit match needs - are already here.
+function toArtist(artist) {
   return {
-    id: details.id,
-    name: details.name,
-    type: details.type,
-    uri: details.uri,
-    href: details.href,
-    external_urls: details.external_urls ?? artist.external_urls ?? null,
-    genres: details.genres ?? [],
-    popularity: details.popularity ?? null,
-    followers: details.followers?.total ?? null,
-    images: details.images ?? [],
+    id: artist.id,
+    name: artist.name,
+    type: artist.type,
+    uri: artist.uri,
+    href: artist.href,
+    external_urls: artist.external_urls ?? null,
+    images: artist.images ?? [],
     roles: Array.isArray(artist.roles) ? artist.roles : [],
   };
 }
 
+// A track's nested album is the simplified form - no `copyrights`. The full album object is the
+// only grounded source of a publisher/label string, so fetch it separately. One call per track,
+// replacing the N per-artist calls dropped above. A failure here is not fatal: Publisher is a
+// nice-to-have, the song itself is not.
+async function fetchAlbumCopyrights(albumId) {
+  if (!albumId) return null;
+  try {
+    const album = await fetchSpotifyResource(`${SPOTIFY_API_BASE}/albums/${albumId}`);
+    return album?.copyrights ?? null;
+  } catch (err) {
+    logger.warn({ err, albumId }, 'Could not fetch Spotify album copyrights, leaving Publisher empty');
+    return null;
+  }
+}
+
 async function normalizeTrack(payload) {
-  const artists = await Promise.all(payload.artists.map((artist) => enrichArtist(artist)));
+  const artists = payload.artists.map(toArtist);
+  const copyrights = await fetchAlbumCopyrights(payload.album?.id);
 
   return {
     type: payload.type,
@@ -269,7 +248,7 @@ async function normalizeTrack(payload) {
       images: payload.album.images,
       external_urls: payload.album.external_urls ?? null,
       external_ids: payload.album.external_ids ?? null,
-      copyrights: payload.album.copyrights ?? null,
+      copyrights,
     },
   };
 }

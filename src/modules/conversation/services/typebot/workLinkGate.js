@@ -1,19 +1,18 @@
 // ==================================================================
-// Gates the Typebot conversation's "share a link to your work" step so
-// the member can add up to MAX_WORK_LINKS links instead of just one.
+// Gates the Typebot conversation's "share a link to your work" step.
 //
-// The published flow has no loop of its own (each path asks for a link
-// exactly once, then moves on) and no counter block, so the repetition
-// is driven from here: after each link is saved we return a synthetic
-// "Add another link?" question - not a real Typebot block, same pattern
-// as registrationEngine.js's OCR-confirmation and email-OTP steps - and
-// only advance the real conversation once the member declines or the
-// cap is reached. Studio needs no changes.
+// The published flow asks for one link and moves on. Everything else the
+// step now does - identifying the provider, showing the song back for
+// confirmation, asking for a credited name when the match fails, and
+// looping up to MAX_WORK_LINKS - is driven from the backend, using
+// synthetic blocks: objects shaped like Typebot inputs that Typebot has
+// never heard of, which the frontend renders like any other question.
+// Same pattern as registrationEngine.js's OCR-confirmation and email-OTP
+// steps. Studio needs no changes.
 //
-// All four link steps (one per role family) share a single variable
-// after the flow was unified - see AGENTS.md.
+// All four role paths share one `workUrl` variable - see AGENTS.md.
 // ==================================================================
-import { MAX_WORK_LINKS } from '../../../spotify/services/workLink.service.js';
+import { MAX_WORK_LINKS } from '../../../work/services/workLink.service.js';
 
 export const WORK_URL_VARIABLE_ID = 'vdcqjfwmljgel9ola6lpinafa'; // workUrl
 
@@ -21,11 +20,31 @@ export const WORK_URL_VARIABLE_ID = 'vdcqjfwmljgel9ola6lpinafa'; // workUrl
 // place; the cap itself is owned and enforced by workLink.service.js.
 export { MAX_WORK_LINKS };
 
+// How many times a member may offer a credited name before we stop asking and save the link for
+// staff to verify. Bounded so nobody can get stuck on this step - see AGENTS.md.
+export const MAX_ALIAS_ATTEMPTS = 2;
+
 export function isWorkLinkStep(variableId) {
   return variableId === WORK_URL_VARIABLE_ID;
 }
 
-// Synthetic block - the member answers this instead of a Typebot question.
+// --- Synthetic blocks -------------------------------------------------------
+
+export const WORK_LINK_CONFIRM_INPUT = {
+  id: 'work-link-confirm',
+  type: 'choice input',
+  items: [
+    { id: 'work-link-confirm-yes', content: "Yes, that's my song" },
+    { id: 'work-link-confirm-no', content: 'No, wrong link' },
+  ],
+};
+
+export const WORK_LINK_ALIAS_INPUT = {
+  id: 'work-link-alias',
+  type: 'text input',
+  options: { labels: { placeholder: 'e.g. Aditya Prateek, AP' } },
+};
+
 export const WORK_LINK_MORE_INPUT = {
   id: 'work-link-add-another',
   type: 'choice input',
@@ -35,7 +54,40 @@ export const WORK_LINK_MORE_INPUT = {
   ],
 };
 
+// --- Answer readers ---------------------------------------------------------
+
+function normalizeAnswer(message) {
+  return String(message ?? '').trim().toLowerCase();
+}
+
+export function confirmsSong(message) {
+  const answer = normalizeAnswer(message);
+  return ["yes, that's my song", 'yes', 'y'].includes(answer);
+}
+
 export function wantsAnotherLink(message) {
-  const normalized = String(message ?? '').trim().toLowerCase();
-  return ['yes, add another', 'yes', 'y', 'add another'].includes(normalized);
+  const answer = normalizeAnswer(message);
+  return ['yes, add another', 'yes', 'y', 'add another'].includes(answer);
+}
+
+// --- Message text -----------------------------------------------------------
+
+// The card the member confirms against. Only fields the provider actually returned are shown -
+// a "Film/Album: —" line for every Spotify single would be noise.
+export function describeSong(resolved) {
+  const lines = [`Song: ${resolved.songName ?? 'Unknown'}`];
+  if (resolved.artists?.length) lines.push(`Artist: ${resolved.artists.join(', ')}`);
+  if (resolved.filmOrAlbum) lines.push(`Film/Album: ${resolved.filmOrAlbum}`);
+  if (resolved.releaseYear) lines.push(`Released: ${resolved.releaseYear}`);
+  return `${lines.join('\n')}\n\nIs this your song?`;
+}
+
+// Members are invited to give more than one name: a legal name, a stage name and an abbreviation
+// are all common, and every name they give is stored so their next links match without asking again.
+export function describeCredits(resolved) {
+  const credits = resolved.artists?.length ? resolved.artists.join(', ') : resolved.channelName;
+  const ask = 'What name (or names) are you credited under? You can enter several, separated by commas.';
+  return credits
+    ? `We couldn't find your name in this song's credits. It lists: ${credits}.\n\n${ask}`
+    : `We couldn't find your name in this song's credits.\n\n${ask}`;
 }

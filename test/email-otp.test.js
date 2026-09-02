@@ -99,6 +99,45 @@ test('Resend cooldown prevents immediate resend', async () => {
   assert.equal(sendCount, 1);
 });
 
+test('Cooldown message tells the member how long to wait', async () => {
+  // The message is shown verbatim in the chat (the conversation engine passes err.message into
+  // describeOtpProblem), so "please wait" with no number leaves them retrying blind.
+  const svc = createEmailOtpService({
+    db: makeFakeDb(),
+    mailer: async () => ({ messageId: 'ok' }),
+    cfg: { ...cfg, EMAIL_OTP_RESEND_COOLDOWN_SECONDS: 60 },
+  });
+
+  await svc.sendEmailOtp({ email: 'wait@example.com' });
+  await assert.rejects(
+    () => svc.sendEmailOtp({ email: 'wait@example.com' }),
+    (err) => {
+      assert.match(err.message, /Please wait \d+ seconds? before requesting another OTP\./, err.message);
+      const seconds = err.details?.retryAfterSeconds;
+      assert.ok(seconds >= 1 && seconds <= 60, `retryAfterSeconds = ${seconds}`);
+      assert.match(err.message, new RegExp(`wait ${seconds} second`));
+      return true;
+    },
+  );
+});
+
+test('Cooldown message says "1 second", not "1 seconds"', async () => {
+  const svc = createEmailOtpService({
+    db: makeFakeDb(),
+    mailer: async () => ({ messageId: 'ok' }),
+    cfg: { ...cfg, EMAIL_OTP_RESEND_COOLDOWN_SECONDS: 1 },
+  });
+
+  await svc.sendEmailOtp({ email: 'one@example.com' });
+  await assert.rejects(
+    () => svc.sendEmailOtp({ email: 'one@example.com' }),
+    (err) => {
+      assert.match(err.message, /Please wait 1 second before/);
+      return true;
+    },
+  );
+});
+
 test('Max attempts locks OTP after failures', async () => {
   const fakeDb = makeFakeDb();
   let sent = null;

@@ -1,0 +1,173 @@
+// ==================================================================
+// Everything on file for a member, shaped for the pre-payment review.
+//
+// Why this exists: a good part of what's stored was never typed by the
+// member. PAN number, date of birth, bank name, account number, IFSC and
+// branch all come from OCR reading their documents - and OCR gets things
+// wrong (the live account's BankBranchName currently holds a passbook
+// form label). A wrong account number sends royalties to the wrong
+// place, so the last moment to catch it is before payment.
+//
+// Read from the DATABASE, not from Typebot's variables. If a value
+// failed to persist, the review shows it missing - which is exactly what
+// the member needs to know at this point.
+// ==================================================================
+import { notFoundError } from '../../../shared/errors.js';
+import { registrationRepository } from '../repositories/registration.repository.js';
+import { workRepository } from '../../work/repositories/work.repository.js';
+
+// Column -> what the member should see it called. Order within each section is the order shown.
+//
+// Detail1-Detail12 are deliberately absent: they're internal duplicates (Detail1 = GST,
+// Detail2 = PAN, Detail10 = a source tag), and printing the same value twice under a meaningless
+// name makes a review harder to check, not easier.
+const SECTIONS = [
+  {
+    title: 'Your details',
+    fields: [
+      ['AccountName', 'Name'],
+      ['AccountAlias', 'Stage name'],
+      ['DOB', 'Date of birth'],
+      ['PlaceOfBirth', 'Place of birth'],
+      ['Nationality', 'Nationality'],
+      ['DualNationality', 'Dual nationality'],
+      ['AccountEmail', 'Email'],
+      ['AccountMobile', 'Mobile'],
+    ],
+  },
+  {
+    title: 'Membership',
+    fields: [
+      ['RollTypeIds', 'Applying as'],
+      ['EntityType', 'Entity type'],
+      ['TeritoryAppFor', 'Territory'],
+      ['GSTNo', 'GST number'],
+      ['AssociationName_India', 'Member of another society'],
+      ['KindAttention1', 'Designation'],
+    ],
+  },
+  {
+    title: 'Address',
+    fields: [
+      ['AccountAddress', 'Permanent / registered'],
+      ['AccountAddress_PR', 'Current / communication'],
+    ],
+  },
+  { title: 'Identity', fields: [['PANNo', 'PAN']] },
+  {
+    // Shown in full, on purpose. These are the OCR-derived fields - masking the account number
+    // would hide the single most expensive thing to get wrong.
+    title: 'Bank',
+    fields: [
+      ['BankName', 'Bank'],
+      ['BankAcNo', 'Account number'],
+      ['BankIFSCCode', 'IFSC'],
+      ['BankBranchName', 'Branch'],
+      ['MicrCode', 'MICR'],
+    ],
+  },
+];
+
+// Stored document type -> what the member called it when they uploaded it.
+const DOCUMENT_LABELS = {
+  PAN: 'PAN card',
+  COMPANY_PAN: 'Company PAN card',
+  AADHAAR: 'Aadhaar',
+  BANK: 'Bank passbook / cheque',
+  NOC: 'NOC',
+  COMPANY_NOC: 'Company NOC',
+  COMPANY_DOC: 'Company document',
+  PROFILE_PHOTO: 'Photo',
+  COMPANY_PHOTO: 'Company photo',
+  PERMANENT_ADDRESS_PROOF: 'Permanent address proof',
+  CURRENT_ADDRESS_PROOF: 'Current address proof',
+  REGISTERED_ADDRESS_PROOF: 'Registered address proof',
+  COMM_ADDRESS_PROOF: 'Communication address proof',
+  COMM_ADDRESS_PROOF_2: 'Communication address proof (2)',
+  PASSPORT: 'Passport',
+  TRC: 'Tax Residency Certificate',
+  COMPANY_TRC: 'Company Tax Residency Certificate',
+  SS_NUMBER: 'Social security number',
+  TIN: 'TIN certificate',
+  FORM_41: 'Form 41',
+  SELF_DECLARATION: 'Self-declaration form',
+  PEC: 'PEC',
+  ENTITY_INCORPORATION: 'Certificate of incorporation',
+  LETTER: 'Letter',
+  GST_CERTIFICATE: 'GST certificate',
+  MOA_AOA: 'MOA / AOA',
+  BOARD_RESOLUTION: 'Board resolution',
+  PARTNERSHIP_DEED: 'Partnership deed',
+  AUTHORITY_LETTER: 'Authority letter',
+  TUM: 'Trade licence / Udyog Aadhaar / MSME certificate',
+};
+
+function formatValue(column, value) {
+  if (value === null || value === undefined) return null;
+
+  if (column === 'DOB') {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    // Day-month-year, the way an Indian member reads a date back.
+    return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  }
+
+  // DualNationality is an Int column holding a Yes/No answer (see saveConversationField).
+  if (column === 'DualNationality') return value === 1 ? 'Yes' : 'No';
+
+  const text = String(value).trim();
+  return text.length > 0 ? text : null;
+}
+
+function labelDocument(documentName) {
+  return DOCUMENT_LABELS[documentName] ?? documentName;
+}
+
+// -> [{ title, lines: [{ label, value }] }] with empty fields and empty sections dropped, so a
+// member who skipped the GST question never sees a blank GST line.
+async function buildReview(userId) {
+  const account = await registrationRepository.findByAccountId(userId);
+  if (!account) throw notFoundError('Registration not found');
+
+  const [documents, works, aliases] = await Promise.all([
+    registrationRepository.findDocumentsByAccountId(userId),
+    workRepository.findByAccountId(userId),
+    registrationRepository.findAliasesByAccountId(userId),
+  ]);
+
+  const sections = SECTIONS.map(({ title, fields }) => ({
+    title,
+    lines: fields
+      .map(([column, label]) => ({ label, value: formatValue(column, account[column]) }))
+      .filter((line) => line.value !== null),
+  })).filter((section) => section.lines.length > 0);
+
+  if (documents.length > 0) {
+    sections.push({
+      title: `Documents you uploaded (${documents.length})`,
+      // No label - these render as a plain bullet list (see describeReview).
+      lines: documents.map((doc) => ({ label: null, value: labelDocument(doc.DocumentName) })),
+    });
+  }
+
+  if (works.length > 0) {
+    sections.push({
+      title: `Your songs (${works.length})`,
+      lines: works.map((work) => ({
+        label: null,
+        value: [work.SongName, work.Artist_Singers].filter(Boolean).join(' - ') || work.DigitalLink,
+      })),
+    });
+  }
+
+  if (aliases.length > 0) {
+    sections.push({
+      title: 'Also credited as',
+      lines: aliases.map((row) => ({ label: null, value: row.AliasName })),
+    });
+  }
+
+  return sections;
+}
+
+export const registrationReviewService = { buildReview, DOCUMENT_LABELS };

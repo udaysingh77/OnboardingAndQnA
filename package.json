@@ -11,6 +11,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
+    "build:progress-map": "node scripts/build-progress-map.mjs",
     "setup:db": "powershell -ExecutionPolicy Bypass -File scripts/setup-db.ps1"
   },
   "prisma": {

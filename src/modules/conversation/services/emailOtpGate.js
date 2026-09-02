@@ -2,9 +2,10 @@
 // Gates the Typebot conversation's "Provide your email id" step:
 // blocks progression until the answered email is OTP-verified via the
 // existing emailOtpService (send-email-otp/verify-email-otp). Mirrors
-// spotifyGate.js's variableId-based recognition, but this step needs a
+// workLinkGate.js's variableId-based recognition, but this step needs a
 // send-then-verify sub-conversation rather than a single pass/fail check.
 // ==================================================================
+import { env } from '../../../config/env.js';
 import { emailOtpService } from '../../auth/services/emailOtp.service.js';
 
 // The "Provide your email id" email-input block's variableId in the
@@ -25,3 +26,42 @@ export function isValidEmail(value) {
 
 export const sendVerificationOtp = (email) => emailOtpService.sendEmailOtp({ email });
 export const verifyVerificationOtp = (email, otp) => emailOtpService.verifyEmailOtp({ email, otp });
+
+// --- What the member may type at the OTP step ------------------------------
+//
+// The OTP field is a plain text input, so the two escapes are keywords rather than buttons - no
+// frontend change, and the same mechanism `resend` has always used.
+
+function normalize(message) {
+  return String(message ?? '').trim().toLowerCase();
+}
+
+export function isResendKeyword(message) {
+  return ['resend', 'resend otp', 'resend the otp', 'send otp again', 'send again', 'new otp'].includes(normalize(message));
+}
+
+// Without this the step is a dead end: a mistyped address never receives a code, every OTP guess
+// fails, and `resend` mails the same wrong address again. The only escape used to be abandoning the
+// whole registration.
+export function isChangeEmailKeyword(message) {
+  return ['change', 'change email', 'change my email', 'wrong email', 'edit email', 'different email'].includes(normalize(message));
+}
+
+// Capped because each change sends mail to an address the member names, and the 60-second resend
+// cooldown doesn't apply across different addresses - uncapped, one session could flood arbitrary
+// inboxes from this project's SMTP account. Three covers a real typo several times over.
+export const MAX_EMAIL_CHANGES = 3;
+
+export function describeOtpSent(email) {
+  return `We've sent a 4-digit OTP to ${email}. Enter it to verify, type "resend" for a new code, or type "change" to use a different email address.`;
+}
+
+export function describeOtpProblem(reason) {
+  return `${reason} Type "resend" for a new code, or "change" to use a different email address.`;
+}
+
+export function describeChangeLimitReached() {
+  const contact = env.SUPPORT_CONTACT?.trim();
+  const where = contact ? `please write to ${contact}` : 'our team will get in touch with you';
+  return `You've already changed your email address ${MAX_EMAIL_CHANGES} times - ${where}. If a code still reaches you, you can enter it here.`;
+}

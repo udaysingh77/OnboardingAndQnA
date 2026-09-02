@@ -1,6 +1,7 @@
 import { badRequestError, appError } from '../../../shared/errors.js';
 import { spotifyService } from './spotify.service.js';
 import { spotifyRepository } from '../repositories/spotify.repository.js';
+import { normalizeName } from '../../../utils/name.js';
 
 // `actualName` and `stageName` are provided by the request payload; no hardcoded defaults.
 
@@ -48,19 +49,6 @@ function buildWorkRegistrationData(track, user) {
     CreatedBy: null,
     ModifedBy: null,
   };
-}
-
-function normalizeName(value) {
-  if (typeof value !== 'string') return '';
-
-  return value
-    .normalize('NFKC')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
-    .replace(/[\u2010-\u2015–—―]/g, '-')
-    .replace(/[.,]/g, '')
-    .toLowerCase();
 }
 
 function getMatchedArtists(artists, normalizedTarget) {
@@ -115,16 +103,21 @@ export async function matchSpotifyClaim(reference, user, actualName, stageName) 
     ? buildMatchResult(stageMatches, 'stageName')
     : { status: false, matchedCredit: null };
 
-  const workRegistrationData = buildWorkRegistrationData(track, user);
-  let workRegistration;
-
-  try {
-    workRegistration = await spotifyRepository.createWorkRegistration(workRegistrationData);
-  } catch (err) {
-    throw appError('Failed to save work registration', {
-      errorCode: 'WORK_REGISTRATION_SAVE_FAILED',
-      cause: err,
-    });
+  // Only a *matched* claim is written. This used to run unconditionally, so a track whose credits
+  // didn't include the caller still landed in App_Accounts_WorkRegistration - i.e. the register
+  // could be filled with songs that aren't the caller's while the response said status:false.
+  let workRegistration = null;
+  if (matchResult.status === true) {
+    try {
+      workRegistration = await spotifyRepository.createWorkRegistration(
+        buildWorkRegistrationData(track, user),
+      );
+    } catch (err) {
+      throw appError('Failed to save work registration', {
+        errorCode: 'WORK_REGISTRATION_SAVE_FAILED',
+        cause: err,
+      });
+    }
   }
 
   return {
@@ -144,9 +137,9 @@ export async function matchSpotifyClaim(reference, user, actualName, stageName) 
         external_urls: track.album?.external_urls,
       },
     },
-    workRegistration: {
-      WorkNotificationId: workRegistration.WorkNotificationId?.toString?.() ?? null,
-    },
+    workRegistration: workRegistration
+      ? { WorkNotificationId: workRegistration.WorkNotificationId?.toString?.() ?? null }
+      : null,
   };
 }
 

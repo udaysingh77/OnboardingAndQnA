@@ -46,15 +46,21 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
 
+  // Shown at the pre-payment review when the member says something needs correcting. Optional:
+  // blank falls back to "our team will get in touch" rather than printing an empty contact line.
+  SUPPORT_CONTACT: z.string().optional(),
+
   SPOTIFY_CLIENT_ID: z.string().optional(),
   SPOTIFY_CLIENT_SECRET: z.string().optional(),
-  // Dev-only: skips the real Spotify match check in the conversation gate, always lets the
-  // spotify-link step advance. z.coerce.boolean() would treat "false" as truthy - same fix as
-  // TYPEBOT_PREVIEW_MODE below.
-  SPOTIFY_VERIFICATION_BYPASS: z
-    .string()
-    .default('false')
-    .transform((v) => v === 'true'),
+
+  // Work links (the songs a member claims). YouTube metadata comes from the keyless oEmbed
+  // endpoint - there is no YouTube Data API key for this project, see work/services/youtube.service.js.
+  YOUTUBE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  // Gemini splits a YouTube title into song/artists/album. Optional: leave GEMINI_API_KEY blank and
+  // the flow falls back to the raw video title instead of breaking.
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default('gemini-flash-lite-latest'),
+  GEMINI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
 
   DEFAULT_REGISTRATION_STATUS: z.string().default('started'),
   REGISTRATION_TOTAL_STEPS: z.coerce.number().int().positive().default(10),
