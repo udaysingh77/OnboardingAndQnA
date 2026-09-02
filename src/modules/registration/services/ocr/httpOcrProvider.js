@@ -21,8 +21,10 @@ const DOC_TYPE_PATHS = {
   BANK: 'bank',
   DRIVING_LICENCE: 'driving-licence',
   VOTER_ID: 'voter-id',
-  PASSPORT: 'passport',
   ELECTRICITY: 'electricity',
+  // PASSPORT: 'passport' - temporarily disabled, endpoint has known issues on the provider's side.
+  // registration.service.js's OCR_DOC_TYPES excludes PASSPORT so this is never reached anyway - see
+  // AGENTS.md for how to re-enable.
 };
 
 export function createHttpOcrProvider() {

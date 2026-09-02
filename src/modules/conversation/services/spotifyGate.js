@@ -11,13 +11,22 @@ import { logger } from '../../../utils/logger.js';
 import { registrationService } from '../../registration/services/registration.service.js';
 import { spotifyClaimService } from '../../spotify/services/spotify.claim.service.js';
 
-// The "Enter your spotify link" url-input block's variableId in the
-// current Typebot flow - update if that block's variable is re-created
-// in Studio (see conversationFieldMap.js for the same precedent).
-export const SPOTIFY_URL_VARIABLE_ID = 'vg4dgww6onbrxfk3yjjg45rhi';
+// The work-link url-input block's variableId. The flow was unified so all four
+// role paths share one `workUrl` variable - this used to be `spotifyUrl`
+// (vg4dgww6onbrxfk3yjjg45rhi), which no block uses any more, so leaving it
+// would have made this gate silently unreachable (the same failure mode as the
+// earlier `teritory` id change - see AGENTS.md). Update if re-created in Studio.
+export const SPOTIFY_URL_VARIABLE_ID = 'vdcqjfwmljgel9ola6lpinafa';
 
 export function isSpotifyUrlStep(variableId) {
   return variableId === SPOTIFY_URL_VARIABLE_ID;
+}
+
+// That same step now accepts YouTube links too, and a YouTube URL can never
+// pass a Spotify artist-credit check - so only claim-verify what is actually a
+// Spotify link, and let everything else through to be saved as-is.
+function isSpotifyUrl(url) {
+  return /(^|\/\/|\.)spotify\.com\//i.test(String(url ?? '').trim());
 }
 
 // Returns true only if the track's credited artists include the account's
@@ -29,6 +38,8 @@ export async function verifySpotifyClaim(userId, url) {
     logger.warn({ userId }, 'SPOTIFY_VERIFICATION_BYPASS is on - skipping real Spotify match check');
     return true;
   }
+
+  if (!isSpotifyUrl(url)) return true;
 
   const { accountName, accountAlias } = await registrationService.getIdentityNames(userId);
   const result = await spotifyClaimService.matchSpotifyClaim(url, { id: userId }, accountName, accountAlias);

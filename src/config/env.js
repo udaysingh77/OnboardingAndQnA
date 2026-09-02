@@ -62,6 +62,14 @@ const envSchema = z.object({
   OCR_PROVIDER: z.enum(['http', 'stub']).default('http'),
   OCR_API_BASE_URL: z.string().default('https://ocr.choira.io'),
   OCR_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  // Blanket kill-switch for OCR across every doc type (independent of OCR_DOC_TYPES in
+  // registration.service.js) - flip to false when ocr.choira.io itself is flaky so chat-flow
+  // testing can proceed past uploads without getting stuck in the "please re-upload" retry loop.
+  // z.coerce.boolean() would treat the string "false" as truthy - same fix as TYPEBOT_PREVIEW_MODE.
+  OCR_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
 
   TYPEBOT_API_BASE_URL: z.string().default('https://typebot.io'),
   // The bot's internal id (preview mode) or publicId (once published) - see TYPEBOT_PREVIEW_MODE.
