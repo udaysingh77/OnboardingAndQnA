@@ -1,11 +1,13 @@
-import { prisma } from '../../../shared/prisma.js';
+// ==================================================================
+// Spotify module repository. Work-registration rows moved to
+// modules/work/repositories/work.repository.js - that table now holds
+// links from YouTube too, so it is no longer Spotify's to own.
+// This stays as the module's data-access seam for the claim path.
+// ==================================================================
+import { workRepository } from '../../work/repositories/work.repository.js';
 
 export const spotifyRepository = {
-  createWorkRegistration(data) {
-    return prisma.appAccountsWorkRegistration.create({ data });
-  },
-
-  countWorkRegistrationsByAccountId(accountId) {
-    return prisma.appAccountsWorkRegistration.count({ where: { AccountId: BigInt(accountId) } });
-  },
+  // Used by spotify.claim.service.js's REST path (POST /spotify/metadata). The chat flow goes
+  // through workLink.service.js instead.
+  createWorkRegistration: workRepository.createWorkRegistration,
 };

@@ -15,16 +15,42 @@ import { typebotClient } from '../services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
 import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
-import { isSpotifyUrlStep, verifySpotifyClaim } from '../services/spotifyGate.js';
 import {
   isWorkLinkStep,
+  confirmsSong,
   wantsAnotherLink,
+  describeSong,
+  describeCredits,
   MAX_WORK_LINKS,
+  MAX_ALIAS_ATTEMPTS,
+  WORK_LINK_CONFIRM_INPUT,
+  WORK_LINK_ALIAS_INPUT,
   WORK_LINK_MORE_INPUT,
 } from '../services/typebot/workLinkGate.js';
-import { workLinkService } from '../../spotify/services/workLink.service.js';
+import { workLinkService } from '../../work/services/workLink.service.js';
+import { resolveWorkLink } from '../../work/services/workLinkResolver.service.js';
+import { matchCredits, MATCH_TRUST } from '../../work/services/workMatch.service.js';
+import {
+  isPaymentStep,
+  confirmsReview,
+  describeReview,
+  describeCorrection,
+  PAYMENT_REVIEW_INPUT,
+} from '../services/typebot/paymentGate.js';
+import { registrationReviewService } from '../../registration/services/registrationReview.service.js';
 import { resolveProgress } from '../services/typebot/progressMap.js';
-import { isEmailStep, isValidEmail, sendVerificationOtp, verifyVerificationOtp } from '../services/emailOtpGate.js';
+import {
+  isEmailStep,
+  isValidEmail,
+  isResendKeyword,
+  isChangeEmailKeyword,
+  sendVerificationOtp,
+  verifyVerificationOtp,
+  describeOtpSent,
+  describeOtpProblem,
+  describeChangeLimitReached,
+  MAX_EMAIL_CHANGES,
+} from '../services/emailOtpGate.js';
 import { isAddressProofTypeStep, resolveAddressProofOcrType, isManualAddressAnswer } from '../services/typebot/addressProofTypeMap.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
@@ -125,9 +151,62 @@ const OCR_CONFIRM_CHOICE_INPUT = {
 // needs no changes (same non-Typebot-block pattern as OCR_CONFIRM_CHOICE_INPUT).
 const EMAIL_OTP_INPUT = { id: 'email-otp-verification', type: 'text input', options: {} };
 
-function isResendKeyword(message) {
-  const normalized = String(message ?? '').trim().toLowerCase();
-  return ['resend', 'resend otp', 'resend the otp', 'send otp again', 'send again', 'new otp'].includes(normalized);
+// Hold the conversation on the work-link step and ask again. Typebot is never advanced, so the
+// member can retry as often as they need without burning one of their MAX_WORK_LINKS slots.
+function askForAnotherLink(existing, text) {
+  return {
+    sessionEnded: false,
+    messages: [textMessage('work-link-retry', text)],
+    input: existing.input,
+    progress: resolveProgress(existing.input.id),
+  };
+}
+
+// Persist the confirmed song, then either offer another slot or fall through to Typebot.
+// Returns either a full reply (the member is under the cap and is offered another link) or
+// `{ advance, notice }` - the conversation should carry on to Typebot, and `notice` is what to tell
+// the member on the way past. The notice matters: at the cap this used to return nothing at all, so
+// the fifth link saved silently and a sixth was discarded silently, both while the other four each
+// got a "Saved - that's N of 5" line. Confirming a song and being told nothing reads as a bug.
+async function saveAndOfferAnother({ userId, existing, resolved, trust, note }) {
+  let count = null;
+  let stored = null;
+  try {
+    // Only a name that was on file beforehand counts as verified - see workMatch.service.js.
+    stored = await workLinkService.saveWorkLink({ userId, resolved, matched: trust === MATCH_TRUST.TRUSTED });
+    count = await workLinkService.countWorkLinks(userId);
+  } catch (err) {
+    // A storage failure must not strand the member on this step - log it and let the conversation
+    // move on, same stance as the OCR persistence path.
+    logger.warn({ userId, err }, 'Failed to save work link, advancing without the loop');
+    return { advance: true, notice: null };
+  }
+
+  const saved = note ?? `Saved - that's ${count} of ${MAX_WORK_LINKS} links.`;
+
+  if (count < MAX_WORK_LINKS) {
+    typebotSessionStore.set(userId, {
+      sessionId: existing.sessionId,
+      input: existing.input,
+      pendingWorkLinkChoice: { lastUrl: resolved.url },
+    });
+
+    return {
+      sessionEnded: false,
+      messages: [textMessage('work-link-saved', `${saved} Would you like to add another?`)],
+      input: WORK_LINK_MORE_INPUT,
+      progress: resolveProgress(existing.input.id),
+    };
+  }
+
+  // At the cap. `stored` is null when saveWorkLink refused because the member was already at five
+  // before this link - they confirmed a song that was not kept, and have to be told so.
+  return {
+    advance: true,
+    notice: stored
+      ? `${saved} That's the maximum, so we'll move on.`
+      : `You've already added the maximum of ${MAX_WORK_LINKS} links, so this one wasn't saved.`,
+  };
 }
 
 /**
@@ -137,6 +216,9 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
   let existing = typebotSessionStore.get(userId);
   let bypassEmailGate = false;
   let bypassWorkLinkSave = false;
+  // Something to tell the member about their work link while the conversation moves past the step -
+  // prepended to Typebot's own reply at the end of the relay.
+  let workLinkNotice = null;
 
   // A stored session can be a leftover from an earlier, never-finished
   // conversation (in-memory store, only clears on completion or server
@@ -180,20 +262,52 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
   // original email question.
   if (existing?.pendingEmailVerification && message !== undefined) {
     const { email } = existing.pendingEmailVerification;
+    // typebotSessionStore.set() replaces the whole session object, so this counter has to be
+    // carried forward explicitly by every set() on the email path - the OTP send, the change
+    // branch and the post-verification replay. Miss one and the cap silently resets.
+    const emailChanges = existing.emailChanges ?? 0;
+
+    // A mistyped address is the one way this step used to wedge for good: no code ever arrives,
+    // every guess fails, and resending just mails the same wrong address.
+    if (isChangeEmailKeyword(message)) {
+      if (emailChanges >= MAX_EMAIL_CHANGES) {
+        return {
+          sessionEnded: false,
+          messages: [textMessage('email-change-limit', describeChangeLimitReached())],
+          input: EMAIL_OTP_INPUT,
+          progress: resolveProgress(existing.input.id),
+        };
+      }
+
+      // Hand back the real Typebot email block. The next answer re-enters the email gate below and
+      // is validated, duplicate-checked and sent an OTP exactly like the first one was.
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        emailChanges: emailChanges + 1,
+      });
+
+      return {
+        sessionEnded: false,
+        messages: [textMessage('email-change-prompt', 'No problem - what email address should we use instead?')],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
 
     if (isResendKeyword(message)) {
       try {
         await sendVerificationOtp(email);
         return {
           sessionEnded: false,
-          messages: [textMessage('email-otp-resent', `We've sent a new OTP to ${email}.`)],
+          messages: [textMessage('email-otp-resent', describeOtpSent(email))],
           input: EMAIL_OTP_INPUT,
           progress: resolveProgress(existing.input.id),
         };
       } catch (err) {
         return {
           sessionEnded: false,
-          messages: [textMessage('email-otp-resend-failed', err.message)],
+          messages: [textMessage('email-otp-resend-failed', describeOtpProblem(err.message))],
           input: EMAIL_OTP_INPUT,
           progress: resolveProgress(existing.input.id),
         };
@@ -205,7 +319,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     } catch (err) {
       return {
         sessionEnded: false,
-        messages: [textMessage('email-otp-invalid', `${err.message} Type "resend" to get a new OTP.`)],
+        messages: [textMessage('email-otp-invalid', describeOtpProblem(err.message))],
         input: EMAIL_OTP_INPUT,
         progress: resolveProgress(existing.input.id),
       };
@@ -215,10 +329,135 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     // original email question correctly - existing.input stays the real
     // Typebot email-input block, so the normal relay/persist logic below
     // treats `email` as the answer to it.
-    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input, emailChanges });
     existing = typebotSessionStore.get(userId);
     bypassEmailGate = true;
     message = email;
+  }
+
+  // Resolve the pre-payment review. The stashed input is the real payment block Typebot handed
+  // us a turn ago - either answer ends up returning it, because Typebot can't be driven backwards
+  // and stranding someone on a review screen would be worse than letting them pay and write in.
+  if (existing?.pendingPaymentReview && message !== undefined) {
+    const { input } = existing.pendingPaymentReview;
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input });
+
+    if (confirmsReview(message)) {
+      return {
+        sessionEnded: false,
+        messages: [],
+        input,
+        progress: resolveProgress(input.id),
+      };
+    }
+
+    return {
+      sessionEnded: false,
+      messages: [textMessage('payment-review-correction', describeCorrection(userId))],
+      input,
+      progress: resolveProgress(input.id),
+    };
+  }
+
+  // Resolve a pending "is this your song?" answer. Nothing has been written yet at this point -
+  // "No" simply drops the resolved song and re-asks, so a wrong link leaves no trace.
+  if (existing?.pendingWorkLinkConfirm && message !== undefined) {
+    const { resolved } = existing.pendingWorkLinkConfirm;
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    existing = typebotSessionStore.get(userId);
+
+    if (!confirmsSong(message)) {
+      return askForAnotherLink(existing, 'No problem - please share the correct link to your song.');
+    }
+
+    // Names already on file: the identity-document name and the registration stage name are
+    // evidence; aliases the member gave at this step on an earlier song are only their own claim.
+    const { trusted, claimed } = await registrationService.getIdentityNames(userId);
+    const { matched, trust } = matchCredits(resolved, trusted, claimed);
+
+    if (!matched) {
+      // Not in the credits. The usual reason is a stage name we don't have on file rather than a
+      // false claim, so ask for it instead of blocking - see AGENTS.md.
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        pendingWorkLinkAlias: { resolved, attempts: 0 },
+      });
+
+      return {
+        sessionEnded: false,
+        messages: [textMessage('work-link-credits-mismatch', describeCredits(resolved))],
+        input: WORK_LINK_ALIAS_INPUT,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    const outcome = await saveAndOfferAnother({ userId, existing, resolved, trust });
+    if (!outcome.advance) return outcome;
+    // At the cap: replay the url as the answer to the real Typebot step so the conversation
+    // advances exactly as it would have without the loop, with the save bypassed. The notice
+    // rides along so the member still hears what happened to the link they just confirmed.
+    workLinkNotice = outcome.notice;
+    bypassWorkLinkSave = true;
+    message = resolved.url;
+  }
+
+  // Resolve a pending "what name are you credited under?" answer.
+  if (existing?.pendingWorkLinkAlias && message !== undefined) {
+    const { resolved, attempts } = existing.pendingWorkLinkAlias;
+    const alias = message;
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    existing = typebotSessionStore.get(userId);
+
+    // The member may give several names at once ("Aditya Prateek, AP").
+    const names = registrationService.parseAliasList(alias);
+
+    // Stored whether or not they match *this* song - that is the point of collecting them, and the
+    // member's next links are matched against them without asking again. Never trusted: they were
+    // supplied after we showed the credit list, so a match here is a claim, not a check.
+    if (names.length > 0) {
+      await registrationService.addAliases(userId, names).catch((err) => {
+        logger.warn({ userId, err }, 'Could not store the credited names');
+      });
+    }
+
+    const { matched } = matchCredits(resolved, [], names);
+
+    if (!matched && attempts + 1 < MAX_ALIAS_ATTEMPTS) {
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        pendingWorkLinkAlias: { resolved, attempts: attempts + 1 },
+      });
+
+      return {
+        sessionEnded: false,
+        messages: [
+          textMessage(
+            'work-link-alias-retry',
+            "That name isn't in the credits either. Please check how your name appears on the release and enter it exactly.",
+          ),
+        ],
+        input: WORK_LINK_ALIAS_INPUT,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    // Either the supplied name is in the credits, or attempts ran out - both save. A member must
+    // never be stuck on this step; staff can find every claim from the CreatedBy marker.
+    const outcome = await saveAndOfferAnother({
+      userId,
+      existing,
+      resolved,
+      trust: MATCH_TRUST.CLAIMED,
+      note: matched
+        ? "Thanks - we've saved this song, and we'll remember that name for your next one."
+        : "We've saved this song. Our team will verify your credit on it.",
+    });
+    if (!outcome.advance) return outcome;
+    workLinkNotice = outcome.notice;
+    bypassWorkLinkSave = true;
+    message = resolved.url;
   }
 
   // Resolve a pending "add another link?" answer - the incoming `message`
@@ -246,82 +485,41 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     message = lastUrl;
   }
 
-  // The Spotify-link step is gated: the conversation only advances past it
-  // once the claimed track's credits actually match the account's name or
-  // alias. A failed/invalid attempt never reaches Typebot's continueChat -
-  // the session stays exactly where it was, and the same question is
-  // re-asked, so the user can try another link.
-  if (existing?.input && message && isSpotifyUrlStep(existing.input.options?.variableId)) {
-    let verified = false;
-    try {
-      verified = await verifySpotifyClaim(userId, message);
-    } catch (err) {
-      logger.warn({ userId, err }, 'Spotify claim verification failed, blocking progression');
-    }
-
-    if (!verified) {
-      return {
-        sessionEnded: false,
-        messages: [
-          {
-            id: 'spotify-verification-failed',
-            type: 'text',
-            content: {
-              type: 'richText',
-              richText: [
-                {
-                  type: 'p',
-                  children: [
-                    {
-                      text: 'Invalid Spotify link - the credited artist name does not match your registered name or stage name. Please enter another Spotify link.',
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        ],
-        input: existing.input,
-        progress: resolveProgress(existing.input.id),
-      };
-    }
-  }
-
-  // Work links: the member may add up to MAX_WORK_LINKS of them, but the flow
-  // only asks once. Save each link as it arrives, then - while there's room
-  // left - hold the conversation on this step and ask whether they'd like to
-  // add another (see workLinkGate.js). Falling through instead advances
-  // Typebot past the step, which is what "No" and hitting the cap both do.
+  // Work links: the member may claim up to MAX_WORK_LINKS songs, but the flow asks once. Everything
+  // between the paste and the save is driven from here with synthetic blocks (see workLinkGate.js):
+  // identify the provider, fetch the song, show it back for confirmation, and - when the credits
+  // don't carry the member's name - ask which name they are credited under. Nothing is written until
+  // the member has confirmed the song; a rejected or unrecognised link never reaches Typebot, so the
+  // session stays on this step and the question simply repeats.
   if (!bypassWorkLinkSave && existing?.input && message && isWorkLinkStep(existing.input.options?.variableId)) {
-    let count = null;
+    let resolved;
     try {
-      await workLinkService.saveWorkLink({ userId, url: message });
-      count = await workLinkService.countWorkLinks(userId);
+      resolved = await resolveWorkLink(message);
     } catch (err) {
-      // A storage failure must not strand the member on this step - log it and
-      // let the conversation move on, same stance as the OCR persistence path.
-      logger.warn({ userId, err }, 'Failed to save work link, advancing without the loop');
+      logger.warn({ userId, err }, 'Could not resolve work link');
+      return askForAnotherLink(existing, "We couldn't read that link. Please check it and share the link to your song again.");
     }
 
-    if (count !== null && count < MAX_WORK_LINKS) {
-      typebotSessionStore.set(userId, {
-        sessionId: existing.sessionId,
-        input: existing.input,
-        pendingWorkLinkChoice: { lastUrl: message },
-      });
-
-      return {
-        sessionEnded: false,
-        messages: [
-          textMessage(
-            'work-link-saved',
-            `Saved - that's ${count} of ${MAX_WORK_LINKS} links. Would you like to add another?`,
-          ),
-        ],
-        input: WORK_LINK_MORE_INPUT,
-        progress: resolveProgress(existing.input.id),
-      };
+    if (!resolved) {
+      return askForAnotherLink(existing, 'Please share a Spotify or YouTube link to your song.');
     }
+
+    if (!resolved.isMusicVideo) {
+      return askForAnotherLink(existing, "That doesn't look like a song. Please share a link to your song.");
+    }
+
+    typebotSessionStore.set(userId, {
+      sessionId: existing.sessionId,
+      input: existing.input,
+      pendingWorkLinkConfirm: { resolved },
+    });
+
+    return {
+      sessionEnded: false,
+      messages: [textMessage('work-link-confirm', describeSong(resolved))],
+      input: WORK_LINK_CONFIRM_INPUT,
+      progress: resolveProgress(existing.input.id),
+    };
   }
 
   // The email step is gated: a fresh answer to "Provide your email id"
@@ -368,13 +566,12 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       sessionId: existing.sessionId,
       input: existing.input,
       pendingEmailVerification: { email: message },
+      emailChanges: existing.emailChanges ?? 0,
     });
 
     return {
       sessionEnded: false,
-      messages: [
-        textMessage('email-otp-sent', `We've sent a 4-digit OTP to ${message}. Please enter it to verify (or type "resend" for a new code).`),
-      ],
+      messages: [textMessage('email-otp-sent', describeOtpSent(message))],
       input: EMAIL_OTP_INPUT,
       progress: resolveProgress(existing.input.id),
     };
@@ -449,9 +646,39 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     });
   }
 
+  const messages = workLinkNotice
+    ? [textMessage('work-link-cap', workLinkNotice), ...(response.messages ?? [])]
+    : (response.messages ?? []);
+
+  // Typebot just offered the payment button. Hold it back one turn and show the member everything
+  // on file first - much of it was read off their documents by OCR rather than typed, and this is
+  // the last point at which a wrong bank account number can still be caught. Typebot's own messages
+  // are kept above the review, so nothing the flow said is lost.
+  if (!ended && isPaymentStep(response.input?.id)) {
+    try {
+      const sections = await registrationReviewService.buildReview(userId);
+
+      typebotSessionStore.set(userId, {
+        sessionId,
+        input: response.input,
+        pendingPaymentReview: { input: response.input },
+      });
+
+      return {
+        sessionEnded: false,
+        messages: [...messages, textMessage('payment-review', describeReview(sections))],
+        input: PAYMENT_REVIEW_INPUT,
+        progress: resolveProgress(response.input.id),
+      };
+    } catch (err) {
+      // Never block payment because the summary couldn't be built - fall through to the button.
+      logger.warn({ userId, err }, 'Could not build the pre-payment review, showing payment directly');
+    }
+  }
+
   return {
     sessionEnded: ended,
-    messages: response.messages,
+    messages,
     input: response.input ?? null,
     progress: ended ? 100 : resolveProgress(response.input?.id),
   };

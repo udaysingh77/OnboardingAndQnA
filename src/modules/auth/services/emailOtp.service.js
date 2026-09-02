@@ -36,7 +36,14 @@ export function createEmailOtpService({ db = prisma, mailer = sendEmail, cfg = e
     if (active) {
       const sinceMs = now.getTime() - active.createdAt.getTime();
       if (sinceMs < resendCooldownSeconds * 1000) {
-        throw badRequestError('Please wait before requesting another OTP.');
+        // Say how long, not just "wait" - this message is shown to the member verbatim (the
+        // conversation engine passes err.message straight into describeOtpProblem), and "please
+        // wait" with no number leaves them retrying blind.
+        const retryAfterSeconds = Math.ceil((resendCooldownSeconds * 1000 - sinceMs) / 1000);
+        throw badRequestError(
+          `Please wait ${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'} before requesting another OTP.`,
+          { details: { retryAfterSeconds } },
+        );
       }
     }
 

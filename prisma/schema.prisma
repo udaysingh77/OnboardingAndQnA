@@ -144,6 +144,21 @@ model AppAccounts {
   @@map("App_Accounts")
 }
 
+/// The names a member is credited under. Created by scripts/add-alias-table.sql and hand-added
+/// here rather than via `db push` - see that script and AGENTS.md. `Source` says where the name
+/// came from, which decides whether a match against it counts as evidence.
+model AppAccountsAlias {
+  AliasId    BigInt   @id(map: "PK_App_Accounts_Alias") @default(autoincrement())
+  AccountId  BigInt
+  AliasName  String   @db.NVarChar(200)
+  Source     String?  @db.NVarChar(50)
+  CreateDate DateTime @default(now(), map: "DF_App_Accounts_Alias_CreateDate") @db.DateTime
+
+  @@unique([AccountId, AliasName], map: "UQ_App_Accounts_Alias_AccountId_AliasName")
+  @@index([AccountId], map: "IX_App_Accounts_Alias_AccountId")
+  @@map("App_Accounts_Alias")
+}
+
 model AppAccountsDoc {
   AccountDocId     BigInt    @id(map: "PK_App_Accounts_Doc") @default(autoincrement())
   AccountId        BigInt?

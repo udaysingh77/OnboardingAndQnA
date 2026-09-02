@@ -105,6 +105,9 @@ const OCR_DOC_TYPES = [
   DOC_TYPES.VOTER_ID,
   DOC_TYPES.ELECTRICITY,
 ];
+// Doc types whose OCR `name` is trustworthy enough to become AccountName. Address proofs are
+// excluded on purpose: an electricity bill or a rent letter routinely carries someone else's name.
+const IDENTITY_OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
@@ -141,12 +144,25 @@ const CONVERSATION_FIELDS = [
 
 const ocrProvider = createOcrProvider();
 
-// Used by the Spotify-claim gate (conversation module) to know which names
-// to check a track's artist credits against.
+// The names a song's credits are checked against, split by how much they're worth as evidence.
+//
+// `trusted` are names on file *before* the member ever saw a song's credits: AccountName (written
+// from their identity document, see runOcrAndPersist) and AccountAlias (the stage name asked during
+// registration). `claimed` are names the member supplied at the work-link step - i.e. after we
+// showed them the credit list - so a match against one of those is a claim, not a check, and the
+// work link is stored unverified. See AGENTS.md.
 async function getIdentityNames(userId) {
   const account = await registrationRepository.findByAccountId(userId);
   if (!account) throw notFoundError('User not found');
-  return { accountName: account.AccountName, accountAlias: account.AccountAlias };
+
+  const aliases = await registrationRepository.findAliasesByAccountId(userId);
+
+  return {
+    accountName: account.AccountName,
+    accountAlias: account.AccountAlias,
+    trusted: [account.AccountName, account.AccountAlias].filter((name) => name?.trim()),
+    claimed: aliases.filter((row) => row.Source === ALIAS_SOURCES.WORK_LINK).map((row) => row.AliasName),
+  };
 }
 
 async function getStatus(userId) {
@@ -225,6 +241,36 @@ function normalizeEmail(value) {
 // this before sending an OTP (see registrationEngine.js) so a member is told the address is taken
 // instead of being walked through a verification that could never be saved. The filtered unique
 // index on App_Accounts(AccountEmail) is the actual guarantee; this is for the message.
+export const ALIAS_SOURCES = Object.freeze({ FLOW: 'flow', WORK_LINK: 'work-link', STAFF: 'staff' });
+
+// Bounds so a pasted paragraph can't fill the table. 200 is the AliasName column width.
+const MAX_ALIASES_PER_TURN = 5;
+const MAX_ALIAS_LENGTH = 200;
+
+// Splits a free-text answer into individual names. The work-link step tells members they may give
+// more than one, separated by commas.
+export function parseAliasList(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0 && name.length <= MAX_ALIAS_LENGTH)
+    .slice(0, MAX_ALIASES_PER_TURN);
+}
+
+// Stores the names a member says they're credited under, so their next link matches without asking
+// again. Written to App_Accounts_Alias rather than AccountAlias: a member can have several names,
+// and that single column is already the target of the flow's own stage-name question *and* the
+// company path's traderName (see conversationFieldMap.js). Duplicates are dropped by the
+// (AccountId, AliasName) unique index. Returns how many were newly stored.
+async function addAliases(userId, names, source = ALIAS_SOURCES.WORK_LINK) {
+  const list = Array.isArray(names) ? names.map((n) => String(n ?? '').trim()).filter(Boolean) : parseAliasList(names);
+  const bounded = [...new Set(list)].filter((n) => n.length <= MAX_ALIAS_LENGTH).slice(0, MAX_ALIASES_PER_TURN);
+  if (bounded.length === 0) return 0;
+
+  const { count } = await registrationRepository.createAliases(userId, bounded, source);
+  return count;
+}
+
 async function isEmailTakenByAnotherAccount(userId, email) {
   const normalized = normalizeEmail(email);
   if (!normalized) return false;
@@ -255,6 +301,21 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
       await registrationRepository.update(registrationId, { PANNo: extracted.pan, Detail2: extracted.pan });
+    }
+
+    // The member's name, taken from an identity document. This is the only name in the system with
+    // any evidence behind it - everything else is self-declared - so the work-link credit match
+    // depends on it (see workMatch.service.js).
+    //
+    // Written ONLY when AccountName is still empty. That guard is what makes this safe: the field
+    // was previously left unpersisted because OCR-formatted text could clobber a real name already
+    // on the row. Restricted to identity documents too - an electricity bill's name is often a
+    // landlord's or a parent's, which is evidence of nothing.
+    if (IDENTITY_OCR_DOC_TYPES.includes(docType) && extracted.name) {
+      const account = await registrationRepository.findByAccountId(registrationId);
+      if (!account?.AccountName?.trim()) {
+        await registrationRepository.update(registrationId, { AccountName: String(extracted.name).trim().slice(0, 100) });
+      }
     }
 
     if (docType === DOC_TYPES.BANK) {
@@ -363,6 +424,9 @@ export const registrationService = {
   saveDocument,
   saveConversationField,
   isEmailTakenByAnotherAccount,
+  addAliases,
+  parseAliasList,
+  ALIAS_SOURCES,
   complete,
   DOC_TYPES,
 };
