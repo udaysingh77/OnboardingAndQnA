@@ -7,6 +7,7 @@
 // ==================================================================
 import { env } from '../../../../config/env.js';
 import { appError, badRequestError } from '../../../../shared/errors.js';
+import { normalizePhone } from '../../../../utils/phone.js';
 
 const BASE_URL = 'https://control.msg91.com/api/v5/otp';
 
@@ -21,7 +22,7 @@ export function createMsg91OtpProvider() {
   async function send(phone) {
     const params = new URLSearchParams({
       template_id: env.MSG91_TEMP_ID,
-      mobile: normalizePhone(phone),
+      mobile: toMobile(phone),
       authkey: env.MSG91_AUT_KEY,
       otp_length: String(env.MSG91_OTP_LENGTH),
       otp_expiry: String(env.MSG91_OTP_EXPIRY),
@@ -33,7 +34,7 @@ export function createMsg91OtpProvider() {
   async function verify({ phone, otp }) {
     const params = new URLSearchParams({
       otp,
-      mobile: normalizePhone(phone),
+      mobile: toMobile(phone),
       authkey: env.MSG91_AUT_KEY,
     });
 
@@ -72,6 +73,10 @@ async function request(url, options) {
   return body;
 }
 
-function normalizePhone(phone) {
-  return String(phone).replace(/^\+/, '');
+// auth.service.js normalizes before it ever gets here, so this is belt-and-braces - it keeps the
+// number the gateway sees and the number stored in AccountMobile on the same canonical form even
+// if some future caller forgets. Falls back to the old "just strip the +" behaviour rather than
+// sending nothing when the helper rejects the input.
+function toMobile(phone) {
+  return normalizePhone(phone) ?? String(phone).replace(/^\+/, '');
 }

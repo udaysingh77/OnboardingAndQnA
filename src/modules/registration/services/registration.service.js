@@ -25,37 +25,119 @@ const DOC_TYPES = Object.freeze({
   PERMANENT_ADDRESS_PROOF: 'PERMANENT_ADDRESS_PROOF',
   CURRENT_ADDRESS_PROOF: 'CURRENT_ADDRESS_PROOF',
   // OCR-only doc types reachable via PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads when
-  // the user picked one of these as their address-proof type - never a DocumentCaption on their
+  // the user picked one of these as their address-proof type - never a stored document type on their
   // own, only ever passed as saveDocument()'s ocrDocType override. "Letter from Property Owner"
   // (the 5th address-proof choice) has no matching OCR endpoint anywhere and stays unmapped.
   DRIVING_LICENCE: 'DRIVING_LICENCE',
   VOTER_ID: 'VOTER_ID',
   PASSPORT: 'PASSPORT',
   ELECTRICITY: 'ELECTRICITY',
+  // (NRI) Author/Composer path uploads - all save-only, no OCR endpoint exists for any of these
+  // (same treatment as NOC/COMPANY_DOC).
+  TRC: 'TRC',
+  SS_NUMBER: 'SS_NUMBER',
+  FORM_41: 'FORM_41',
+  TIN: 'TIN',
+  SELF_DECLARATION: 'SELF_DECLARATION',
+  // (NRI) Owner/Publisher path uploads - also all save-only. The 3 address slots below can still
+  // receive an ocrDocType override from their paired type-choice question (see addressProofTypeMap.js),
+  // same mechanism as PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF above.
+  COMPANY_PHOTO: 'COMPANY_PHOTO',
+  PEC: 'PEC',
+  ENTITY_INCORPORATION: 'ENTITY_INCORPORATION',
+  COMPANY_TRC: 'COMPANY_TRC',
+  LETTER: 'LETTER',
+  REGISTERED_ADDRESS_PROOF: 'REGISTERED_ADDRESS_PROOF',
+  COMM_ADDRESS_PROOF: 'COMM_ADDRESS_PROOF',
+  COMM_ADDRESS_PROOF_2: 'COMM_ADDRESS_PROOF_2',
+  // Owner/Publisher path. COMPANY_PAN is OCR'd as a PAN (see OCR_TYPE_BY_DOC_TYPE); the rest are
+  // save-only - no OCR endpoint exists for any of them. MOA_AOA/BOARD_RESOLUTION/COMPANY_NOC are
+  // Corporate-only, PARTNERSHIP_DEED/AUTHORITY_LETTER Partnership-only, TUM Sole-Proprietorship-only.
+  COMPANY_PAN: 'COMPANY_PAN',
+  GST_CERTIFICATE: 'GST_CERTIFICATE',
+  MOA_AOA: 'MOA_AOA',
+  BOARD_RESOLUTION: 'BOARD_RESOLUTION',
+  COMPANY_NOC: 'COMPANY_NOC',
+  PARTNERSHIP_DEED: 'PARTNERSHIP_DEED',
+  AUTHORITY_LETTER: 'AUTHORITY_LETTER',
+  TUM: 'TUM',
 });
-// Only these gate /complete - NOC/COMPANY_DOC/PROFILE_PHOTO/CURRENT_ADDRESS_PROOF are
-// conditional/optional in the flow. PERMANENT_ADDRESS_PROOF replaces AADHAAR as the mandatory
-// address-proof step - the live flow never asks for Aadhaar specifically anymore.
-const REQUIRED_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.BANK, DOC_TYPES.PERMANENT_ADDRESS_PROOF];
+
+// Doc types that are OCR'd as a *different* type than they're stored under. Unlike the address
+// proofs - whose type comes from a preceding choice question, stashed per-session - this is static:
+// a company PAN is always OCR'd as a PAN (writing PANNo/Detail2), while the row keeps the honest
+// COMPANY_PAN caption so a human reviewer can tell the two apart.
+const OCR_TYPE_BY_DOC_TYPE = { COMPANY_PAN: 'PAN' };
+// What gates /complete - NOC/COMPANY_DOC/PROFILE_PHOTO/CURRENT_ADDRESS_PROOF are
+// conditional/optional in the flow. Each entry is satisfied by *any one* of its types, because the
+// same real-world requirement is collected under a different doc type on each role path: an
+// individual uploads PAN and PERMANENT_ADDRESS_PROOF, a company uploads COMPANY_PAN and
+// REGISTERED_ADDRESS_PROOF. Requiring the individual names outright made completion impossible on
+// the three company/NRI paths - complete() threw REGISTRATION_INCOMPLETE forever, so
+// ApplicationStatus never reached 1 and the territory fallback below never fired.
+// PERMANENT_ADDRESS_PROOF replaces AADHAAR as the individual address-proof step - the live flow
+// never asks for Aadhaar specifically anymore. COMM_ADDRESS_PROOF* are deliberately excluded: they
+// are the secondary correspondence address, not proof of the primary one.
+const REQUIRED_DOC_GROUPS = [
+  {
+    // Proof of identity / tax registration. An Indian individual gives a PAN, a company its
+    // COMPANY_PAN, and an NRI - who often has no Indian PAN at all - a PASSPORT and/or the foreign
+    // TIN that stands in for one (observed on a live NRI Author/Composer run: PROFILE_PHOTO,
+    // PASSPORT, TRC, BANK, PERMANENT_ADDRESS_PROOF, TIN, SELF_DECLARATION - no PAN anywhere).
+    label: 'identity',
+    types: [DOC_TYPES.PAN, DOC_TYPES.COMPANY_PAN, DOC_TYPES.PASSPORT, DOC_TYPES.TIN],
+  },
+  { label: 'bank', types: [DOC_TYPES.BANK] },
+  {
+    label: 'address-proof',
+    types: [DOC_TYPES.PERMANENT_ADDRESS_PROOF, DOC_TYPES.REGISTERED_ADDRESS_PROOF],
+  },
+];
 // OCR runs for these - NOC/company docs/profile photos/address-proof-with-an-unsupported-type are
 // saved as-is. PROFILE_PHOTO's passport-photo endpoint was briefly wired in but is not currently
-// working - reverted, see AGENTS.md.
+// working - reverted, see AGENTS.md. PASSPORT is likewise temporarily disabled - its OCR endpoint
+// currently has known issues on the provider's side - see AGENTS.md.
 const OCR_DOC_TYPES = [
   DOC_TYPES.PAN,
   DOC_TYPES.AADHAAR,
   DOC_TYPES.BANK,
   DOC_TYPES.DRIVING_LICENCE,
   DOC_TYPES.VOTER_ID,
-  DOC_TYPES.PASSPORT,
   DOC_TYPES.ELECTRICITY,
 ];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
+// Which AppAccounts column an OCR-extracted `address` goes to, keyed by the upload slot (the
+// original docType, before any ocrDocType override). Base column = permanent/registered address,
+// `_PR` suffix = current/communication address (user-confirmed mapping, see AGENTS.md).
+// COMM_ADDRESS_PROOF is deliberately absent: its choice list is entity-existence documents
+// (MOA/Incorporation Certificate/Board Resolution/Trade License/Letter from Bank), not an address.
+const ADDRESS_COLUMN_BY_SLOT = {
+  [DOC_TYPES.PERMANENT_ADDRESS_PROOF]: 'AccountAddress',
+  [DOC_TYPES.CURRENT_ADDRESS_PROOF]: 'AccountAddress_PR',
+  [DOC_TYPES.REGISTERED_ADDRESS_PROOF]: 'AccountAddress',
+  [DOC_TYPES.COMM_ADDRESS_PROOF_2]: 'AccountAddress_PR',
+};
 // Fields conversationFieldMap.js is allowed to write to - keeps an arbitrary
 // mapped column name from being trusted blindly, even though the map only
 // ever contains these three today.
-const CONVERSATION_FIELDS = ['GSTNo', 'AccountAlias', 'AccountEmail', 'PlaceOfBirth', 'RollTypeIds', 'TeritoryAppFor'];
+const CONVERSATION_FIELDS = [
+  'GSTNo',
+  'AccountAlias',
+  'AccountEmail',
+  'PlaceOfBirth',
+  'RollTypeIds',
+  'TeritoryAppFor',
+  'Nationality',
+  'AssociationName_India',
+  'DualNationality',
+  'AccountAddress',
+  'AccountAddress_PR',
+  'ChanlDesc',
+  'KindAttention1',
+  'EntityType',
+];
 
 const ocrProvider = createOcrProvider();
 
@@ -81,7 +163,7 @@ function assertOwnRegistration(userId, registrationId) {
   }
 }
 
-// `ocrDocType` lets a caller run OCR under a different type than the DocumentCaption being saved -
+// `ocrDocType` lets a caller run OCR under a different type than the one being saved on the row -
 // used for PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads, where the DB row stays generic
 // but the actual document might be a Driving Licence or Voter ID (see addressProofTypeMap.js).
 async function saveDocument(userId, registrationId, docType, documentUrl, ocrDocType) {
@@ -90,8 +172,8 @@ async function saveDocument(userId, registrationId, docType, documentUrl, ocrDoc
   const account = await registrationRepository.findByAccountId(registrationId);
   if (!account) throw notFoundError('Registration not found');
 
-  const effectiveOcrType = ocrDocType ?? docType;
-  const ocrResult = OCR_DOC_TYPES.includes(effectiveOcrType)
+  const effectiveOcrType = ocrDocType ?? OCR_TYPE_BY_DOC_TYPE[docType] ?? docType;
+  const ocrResult = env.OCR_ENABLED && OCR_DOC_TYPES.includes(effectiveOcrType)
     ? await runOcrAndPersist(registrationId, effectiveOcrType, documentUrl, docType)
     : null;
 
@@ -117,10 +199,38 @@ async function saveConversationField(userId, registrationId, field, value) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!trimmed) return;
 
-  const update = { [field]: trimmed };
-  if (field === 'GSTNo') update.Detail1 = trimmed;
+  let update;
+  if (field === 'DualNationality') {
+    // DB column is Int/TinyInt, not text - the chat answer is a Yes/No choice.
+    const normalized = trimmed.toLowerCase();
+    if (normalized !== 'yes' && normalized !== 'no') return;
+    update = { DualNationality: normalized === 'yes' ? 1 : 0 };
+  } else if (field === 'AccountEmail') {
+    // Stored lowercase so "A@B.com" and "a@b.com" can't become two accounts regardless of the
+    // column's collation - the unique index can only enforce what's actually written.
+    update = { AccountEmail: normalizeEmail(trimmed) };
+  } else {
+    update = { [field]: trimmed };
+    if (field === 'GSTNo') update.Detail1 = trimmed;
+  }
 
   await registrationRepository.update(registrationId, update);
+}
+
+function normalizeEmail(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+// True only when the email already belongs to a *different* account. The chat's email step calls
+// this before sending an OTP (see registrationEngine.js) so a member is told the address is taken
+// instead of being walked through a verification that could never be saved. The filtered unique
+// index on App_Accounts(AccountEmail) is the actual guarantee; this is for the message.
+async function isEmailTakenByAnotherAccount(userId, email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return false;
+
+  const owner = await registrationRepository.findByAccountEmail(normalized);
+  return Boolean(owner) && String(owner.AccountId) !== String(userId);
 }
 
 // OCR dates come back as "DD/MM/YYYY" strings (per the Document Verification API's documented
@@ -157,10 +267,9 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
       }
     }
 
-    if (extracted.address && addressSlot === DOC_TYPES.PERMANENT_ADDRESS_PROOF) {
-      await registrationRepository.update(registrationId, { AccountAddress: extracted.address });
-    } else if (extracted.address && addressSlot === DOC_TYPES.CURRENT_ADDRESS_PROOF) {
-      await registrationRepository.update(registrationId, { AccountAddress_PR: extracted.address });
+    const addressColumn = ADDRESS_COLUMN_BY_SLOT[addressSlot];
+    if (extracted.address && addressColumn) {
+      await registrationRepository.update(registrationId, { [addressColumn]: extracted.address });
     }
 
     // Whichever doc type happens to extract these - PAN/Passport for dob, Aadhaar/Voter ID for
@@ -172,10 +281,6 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     if (extracted.gender) {
       await registrationRepository.update(registrationId, { Gender: extracted.gender });
     }
-    if (docType === DOC_TYPES.PASSPORT && extracted.nationality) {
-      await registrationRepository.update(registrationId, { Nationality: extracted.nationality });
-    }
-
     // Aadhaar's extracted number/name/dob/gender/address are intentionally not
     // persisted to AppAccounts - only used here to compute `verified`.
     return { verified: Boolean(extracted.isValid), extracted };
@@ -203,9 +308,9 @@ async function complete(userId, registrationId) {
   if (!account.AccountEmail) missing.push('basic-details');
 
   const docs = await registrationRepository.findDocumentsByAccountId(registrationId);
-  const uploadedTypes = new Set(docs.map((doc) => doc.DocumentCaption));
-  for (const docType of REQUIRED_DOC_TYPES) {
-    if (!uploadedTypes.has(docType)) missing.push(docType.toLowerCase());
+  const uploadedTypes = new Set(docs.map((doc) => doc.DocumentName));
+  for (const group of REQUIRED_DOC_GROUPS) {
+    if (!group.types.some((docType) => uploadedTypes.has(docType))) missing.push(group.label);
   }
 
   if (missing.length > 0) {
@@ -215,6 +320,15 @@ async function complete(userId, registrationId) {
     });
   }
 
+  // Territory defaults to WORLD when the user skipped the flow's territory question (or never
+  // reached it) - an actual INDIA/WORLD answer is already persisted by saveConversationField() and
+  // wins. Done here rather than on the skip itself: the territory blocks have no Typebot skip
+  // option, and registrationEngine.handle() only persists a truthy answer, so there's no skip
+  // event to hook. Idempotent - only fires while the column is still empty.
+  if (!account.TeritoryAppFor?.trim()) {
+    await registrationRepository.update(registrationId, { TeritoryAppFor: 'WORLD' });
+  }
+
   const updated = account.ApplicationStatus === REGISTERED ? account : await registrationRepository.markCompleted(registrationId);
   return toPublic(updated);
 }
@@ -222,8 +336,10 @@ async function complete(userId, registrationId) {
 function toDocumentPublic(doc, ocrResult) {
   return {
     registrationId: String(doc.AccountId),
-    documentType: doc.DocumentCaption,
-    documentUrl: doc.DocumentName,
+    // DocumentName holds the type, DocumentCaption the URL (see registration.repository.js) - the
+    // response keys below intentionally keep their original, self-describing names.
+    documentType: doc.DocumentName,
+    documentUrl: doc.DocumentCaption,
     status: doc.DocStatus,
     updatedAt: doc.ModifedDate,
     ...(ocrResult ? { verified: ocrResult.verified, extracted: ocrResult.extracted } : {}),
@@ -246,6 +362,7 @@ export const registrationService = {
   getStatus,
   saveDocument,
   saveConversationField,
+  isEmailTakenByAnotherAccount,
   complete,
   DOC_TYPES,
 };

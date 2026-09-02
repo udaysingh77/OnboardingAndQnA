@@ -16,9 +16,16 @@ import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js'
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
 import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
 import { isSpotifyUrlStep, verifySpotifyClaim } from '../services/spotifyGate.js';
+import {
+  isWorkLinkStep,
+  wantsAnotherLink,
+  MAX_WORK_LINKS,
+  WORK_LINK_MORE_INPUT,
+} from '../services/typebot/workLinkGate.js';
+import { workLinkService } from '../../spotify/services/workLink.service.js';
 import { resolveProgress } from '../services/typebot/progressMap.js';
 import { isEmailStep, isValidEmail, sendVerificationOtp, verifyVerificationOtp } from '../services/emailOtpGate.js';
-import { isAddressProofTypeStep, resolveAddressProofOcrType } from '../services/typebot/addressProofTypeMap.js';
+import { isAddressProofTypeStep, resolveAddressProofOcrType, isManualAddressAnswer } from '../services/typebot/addressProofTypeMap.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
 // in this order) - see "Document Verification API" for the real OCR
@@ -58,20 +65,25 @@ const OCR_FIELD_LABELS = {
     state: 'State',
     assemblyConstituency: 'Assembly Constituency',
   },
-  // Field names are a best-effort guess from the collection's one-line description ("MRZ and
-  // printed fields") following this API's established naming convention (see PAN/DRIVING_LICENCE
-  // above) - not yet confirmed against a real success response. Harmless if wrong: unmatched keys
-  // are simply omitted from the confirmation message (see buildOcrConfirmationMessages's filter).
-  PASSPORT: {
-    name: 'Name',
-    passportNumber: 'Passport Number',
-    dob: 'Date of Birth',
-    nationality: 'Nationality',
-    expiryDate: 'Valid Till',
-  },
-  // Same caveat as PASSPORT - collection only documents "Bill name + address".
+  // PASSPORT: temporarily disabled (see registration.service.js's OCR_DOC_TYPES) - endpoint has
+  // known issues on the provider's side. No entry needed here since buildOcrConfirmationMessages()
+  // is never called with docType === 'PASSPORT' while that's the case - see AGENTS.md to re-enable.
+  //
+  // Same caveat as PAN/DRIVING_LICENCE above - collection only documents "Bill name + address" for
+  // ELECTRICITY, not yet confirmed against a real success response.
   ELECTRICITY: { name: 'Name', address: 'Address' },
 };
+
+// Upload slots whose document type isn't known from the upload block itself - it was recorded a
+// turn earlier from the paired "what type of document is this?" choice question (see
+// addressProofTypeMap.js). Individual/NRI paths use the first two; the company paths add three more.
+const ADDRESS_PROOF_UPLOAD_TYPES = new Set([
+  'PERMANENT_ADDRESS_PROOF',
+  'CURRENT_ADDRESS_PROOF',
+  'REGISTERED_ADDRESS_PROOF',
+  'COMM_ADDRESS_PROOF',
+  'COMM_ADDRESS_PROOF_2',
+]);
 
 function isAffirmative(message) {
   const normalized = String(message ?? '').trim().toLowerCase();
@@ -124,6 +136,7 @@ function isResendKeyword(message) {
 export async function handle({ userId, token, message, attachedFileUrls }) {
   let existing = typebotSessionStore.get(userId);
   let bypassEmailGate = false;
+  let bypassWorkLinkSave = false;
 
   // A stored session can be a leftover from an earlier, never-finished
   // conversation (in-memory store, only clears on completion or server
@@ -208,6 +221,31 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     message = email;
   }
 
+  // Resolve a pending "add another link?" answer - the incoming `message`
+  // answers that synthetic question, not the real Typebot one underneath.
+  // "Yes" re-asks for a link without advancing Typebot; "No" falls through
+  // to the normal relay, which advances past the link step.
+  if (existing?.pendingWorkLinkChoice && message !== undefined) {
+    const { lastUrl } = existing.pendingWorkLinkChoice;
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    existing = typebotSessionStore.get(userId);
+
+    if (wantsAnotherLink(message)) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('work-link-next', 'Please share the next link to your work.')],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    // Declined - replay the last link as the answer to the real Typebot step
+    // so the conversation advances exactly as it would have without the loop.
+    // bypassWorkLinkSave stops that replay from saving the same link twice.
+    bypassWorkLinkSave = true;
+    message = lastUrl;
+  }
+
   // The Spotify-link step is gated: the conversation only advances past it
   // once the claimed track's credits actually match the account's name or
   // alias. A failed/invalid attempt never reaches Typebot's continueChat -
@@ -249,6 +287,43 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     }
   }
 
+  // Work links: the member may add up to MAX_WORK_LINKS of them, but the flow
+  // only asks once. Save each link as it arrives, then - while there's room
+  // left - hold the conversation on this step and ask whether they'd like to
+  // add another (see workLinkGate.js). Falling through instead advances
+  // Typebot past the step, which is what "No" and hitting the cap both do.
+  if (!bypassWorkLinkSave && existing?.input && message && isWorkLinkStep(existing.input.options?.variableId)) {
+    let count = null;
+    try {
+      await workLinkService.saveWorkLink({ userId, url: message });
+      count = await workLinkService.countWorkLinks(userId);
+    } catch (err) {
+      // A storage failure must not strand the member on this step - log it and
+      // let the conversation move on, same stance as the OCR persistence path.
+      logger.warn({ userId, err }, 'Failed to save work link, advancing without the loop');
+    }
+
+    if (count !== null && count < MAX_WORK_LINKS) {
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        pendingWorkLinkChoice: { lastUrl: message },
+      });
+
+      return {
+        sessionEnded: false,
+        messages: [
+          textMessage(
+            'work-link-saved',
+            `Saved - that's ${count} of ${MAX_WORK_LINKS} links. Would you like to add another?`,
+          ),
+        ],
+        input: WORK_LINK_MORE_INPUT,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+  }
+
   // The email step is gated: a fresh answer to "Provide your email id"
   // triggers an OTP send instead of relaying straight to Typebot - the
   // conversation only advances once verifyVerificationOtp() succeeds
@@ -260,6 +335,19 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       return {
         sessionEnded: false,
         messages: [textMessage('email-invalid-format', 'That doesn\'t look like a valid email address. Please enter a valid email.')],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    // One account per email. Checked before the OTP is sent, so the member isn't walked through a
+    // verification whose result could never be saved - and no mail is wasted on it either. The
+    // filtered unique index on App_Accounts(AccountEmail) is the real guarantee; this is the
+    // message that makes it comprehensible.
+    if (await registrationService.isEmailTakenByAnotherAccount(userId, message)) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('email-already-registered', 'That email is already registered to another account. Please enter a different one.')],
         input: existing.input,
         progress: resolveProgress(existing.input.id),
       };
@@ -326,7 +414,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     // handleUpload() to decide OCR routing (see addressProofTypeMap.js).
     if (isAddressProofTypeStep(existing.input.options?.variableId)) {
       addressProofOcrType = resolveAddressProofOcrType(message);
-      if (addressProofOcrType === null) {
+      if (addressProofOcrType === null && !isManualAddressAnswer(message)) {
         logger.warn({ userId, message }, 'Address-proof type answer did not resolve to an OCR type');
       }
     }
@@ -408,7 +496,7 @@ export async function handleUpload({ userId, token, file }) {
   // registrationEngine.handle()). null means an unsupported type (Passport/Electricity Bill/
   // Letter from Property Owner) or none recorded - saveDocument() falls back to docType itself,
   // which isn't in OCR_DOC_TYPES, so OCR is correctly skipped.
-  const isAddressProofUpload = docType === 'PERMANENT_ADDRESS_PROOF' || docType === 'CURRENT_ADDRESS_PROOF';
+  const isAddressProofUpload = ADDRESS_PROOF_UPLOAD_TYPES.has(docType);
   const ocrDocType = isAddressProofUpload ? session.addressProofOcrType : undefined;
   if (isAddressProofUpload && ocrDocType == null) {
     logger.warn({ userId, docType }, 'Address-proof upload has no OCR type recorded in session - OCR will be skipped');

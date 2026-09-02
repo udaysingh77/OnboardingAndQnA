@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check src/config/env.js)",
+      "Bash(node --check src/modules/conversation/services/typebot/typebotClient.js)",
+      "Bash(node --check test/smoke.test.js)",
+      "Bash(node scratch-typebot-full-walk.mjs)",
+      "Bash(powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\\\"Name='node.exe'\\\\\" | Select-Object ProcessId, CommandLine | Format-List\")"
+    ]
+  }
+}

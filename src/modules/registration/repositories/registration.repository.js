@@ -10,6 +10,16 @@ function findByAccountId(accountId) {
   return prisma.appAccounts.findUnique({ where: { AccountId: BigInt(accountId) } });
 }
 
+// Emails are stored lowercase (see saveConversationField), so the caller passes an already
+// normalized value. findFirst rather than findUnique: the uniqueness lives in a filtered index that
+// Prisma's schema can't express, so the client doesn't know the column is unique.
+function findByAccountEmail(email) {
+  return prisma.appAccounts.findFirst({
+    where: { AccountEmail: email },
+    select: { AccountId: true },
+  });
+}
+
 function markCompleted(accountId) {
   return prisma.appAccounts.update({
     where: { AccountId: BigInt(accountId) },
@@ -21,26 +31,27 @@ function update(accountId, data) {
   return prisma.appAccounts.update({ where: { AccountId: BigInt(accountId) }, data });
 }
 
-// App_Accounts_Doc has no unique constraint on (AccountId, DocumentCaption), so a
+// `DocumentName` holds the document type ("PAN"), `DocumentCaption` holds the S3 URL - see
+// AGENTS.md. App_Accounts_Doc has no unique constraint on (AccountId, DocumentName), so a
 // re-upload is handled as a manual find-then-update-or-create rather than a native
 // Prisma upsert (which requires a unique/id field to match on).
 async function upsertDocument({ accountId, caption, documentUrl, docStatus = 0 }) {
   const existing = await prisma.appAccountsDoc.findFirst({
-    where: { AccountId: BigInt(accountId), DocumentCaption: caption },
+    where: { AccountId: BigInt(accountId), DocumentName: caption },
   });
 
   if (existing) {
     return prisma.appAccountsDoc.update({
       where: { AccountDocId: existing.AccountDocId },
-      data: { DocumentName: documentUrl, DocStatus: docStatus, ModifedDate: new Date() },
+      data: { DocumentCaption: documentUrl, DocStatus: docStatus, ModifedDate: new Date() },
     });
   }
 
   return prisma.appAccountsDoc.create({
     data: {
       AccountId: BigInt(accountId),
-      DocumentCaption: caption,
-      DocumentName: documentUrl,
+      DocumentName: caption,
+      DocumentCaption: documentUrl,
       DocStatus: docStatus,
     },
   });
@@ -52,6 +63,7 @@ function findDocumentsByAccountId(accountId) {
 
 export const registrationRepository = {
   findByAccountId,
+  findByAccountEmail,
   markCompleted,
   update,
   upsertDocument,

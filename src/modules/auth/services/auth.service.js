@@ -5,36 +5,59 @@
 // Users are App_Accounts rows; AccountId is a bigint (stringified for JWT).
 // ==================================================================
 import jwt from 'jsonwebtoken';
+import { Prisma } from '@prisma/client';
 import { badRequestError, unauthorizedError } from '../../../shared/errors.js';
 import { signAccessToken } from '../../../utils/token.js';
+import { normalizePhone } from '../../../utils/phone.js';
 import { userRepository } from '../../user/repositories/user.repository.js';
 import { createOtpProvider } from './otp/otpProvider.factory.js';
 import { tokenBlacklist } from './tokenBlacklist.js';
 
 export function createAuthService({ otpProvider = createOtpProvider() } = {}) {
+  // AccountMobile is the login identity, so every path - OTP send, OTP verify, lookup and create -
+  // has to agree on one spelling of the number. Without this, "+919876543210" and "9876543210" are
+  // the same person to MSG91 but two different accounts to us. See utils/phone.js.
+  function toCanonicalPhone(phone) {
+    const normalized = normalizePhone(phone);
+    if (!normalized) throw badRequestError('Invalid phone number', { errorCode: 'INVALID_PHONE' });
+    return normalized;
+  }
+
   async function sendOtp({ phone }) {
-    await otpProvider.send(phone);
+    const canonicalPhone = toCanonicalPhone(phone);
+    await otpProvider.send(canonicalPhone);
 
     // Dev-only: echo the generated OTP so the flow can be exercised
-    // without an SMS gateway.
+    // without an SMS gateway. Keyed by the same canonical number send() used.
     const mockOtp =
       typeof otpProvider.getLastOtp === 'function'
-        ? await otpProvider.getLastOtp(phone)
+        ? await otpProvider.getLastOtp(canonicalPhone)
         : null;
 
     return { message: 'OTP sent', ...(mockOtp ? { otp: mockOtp } : {}) };
   }
 
   async function verifyOtp({ phone, otp }) {
-    const valid = await otpProvider.verify({ phone, otp });
+    const canonicalPhone = toCanonicalPhone(phone);
+    const valid = await otpProvider.verify({ phone: canonicalPhone, otp });
     if (!valid) throw badRequestError('Invalid or expired OTP', { errorCode: 'INVALID_OTP' });
 
-    let user = await userRepository.findByAccountMobile(phone);
+    let user = await userRepository.findByAccountMobile(canonicalPhone);
     if (!user) {
-      user = await userRepository.create({
-        AccountGroupId: 0,
-        AccountMobile: phone,
-      });
+      try {
+        user = await userRepository.create({
+          AccountGroupId: 0,
+          AccountMobile: canonicalPhone,
+        });
+      } catch (err) {
+        // Two verify requests for the same new number can both miss the lookup above and race to
+        // create. The filtered unique index on App_Accounts(AccountMobile) makes the loser fail with
+        // P2002 - that member should simply be logged into the account the winner created, not shown
+        // an error. (See scripts/add-unique-indexes.sql.)
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') throw err;
+        user = await userRepository.findByAccountMobile(canonicalPhone);
+        if (!user) throw err;
+      }
     }
 
     const registrationStatus = deriveRegistrationStatus(user);

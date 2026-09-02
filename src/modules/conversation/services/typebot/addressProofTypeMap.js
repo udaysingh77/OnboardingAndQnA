@@ -36,3 +36,18 @@ export function isAddressProofTypeStep(variableId) {
 export function resolveAddressProofOcrType(answerText) {
   return OCR_TYPE_BY_ANSWER[String(answerText ?? '').trim().toLowerCase()] ?? null;
 }
+
+// Several paths add a "type it instead of uploading" choice to their address-proof-type question -
+// picking it skips the file-upload step entirely and branches straight to a text-input block
+// (P_address/c_address for the NRI individual path, registered_address_type/comm_address2_type for
+// the company paths - all in conversationFieldMap.js) instead. Not an unresolved OCR type, so
+// callers should skip the "did not resolve" warning for these answers.
+const MANUAL_ADDRESS_ANSWERS = new Set([
+  'type your address',
+  'type registered address',
+  'type communication address',
+]);
+
+export function isManualAddressAnswer(answerText) {
+  return MANUAL_ADDRESS_ANSWERS.has(String(answerText ?? '').trim().toLowerCase());
+}
