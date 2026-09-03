@@ -10,7 +10,7 @@
 // ==================================================================
 import { badRequestError } from '../../../shared/errors.js';
 import { logger } from '../../../utils/logger.js';
-import { registrationService } from '../../registration/services/registration.service.js';
+import { registrationService, OCR_TYPE_BY_DOC_TYPE } from '../../registration/services/registration.service.js';
 import { typebotClient } from '../services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
@@ -58,7 +58,7 @@ import { isAddressProofTypeStep, resolveAddressProofOcrType, isManualAddressAnsw
 // response shape. Everything else (isValid, documentType, holderTypeCode,
 // accountNumberSource, ifscSource, ifscVerified, bankCode, branchCode) is
 // internal/provenance metadata, not something a user confirms.
-const OCR_FIELD_LABELS = {
+export const OCR_FIELD_LABELS = {
   PAN: { name: 'Name', pan: 'PAN Number', dob: 'Date of Birth', holderType: 'Holder Type' },
   AADHAAR: { name: 'Name', aadhaar: 'Aadhaar Number', dob: 'Date of Birth', gender: 'Gender', address: 'Address' },
   BANK: {
@@ -739,10 +739,13 @@ export async function handleUpload({ userId, token, file }) {
   // if nothing could be read at all. Non-OCR doc types (no `extracted` key
   // present) fall straight through to the normal advance, unchanged.
   if (result && Object.prototype.hasOwnProperty.call(result, 'extracted')) {
-    // Use the specific OCR type consulted (e.g. DRIVING_LICENCE) for field labels when this was
-    // an address-proof upload, not the generic PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF
-    // caption - OCR_FIELD_LABELS has no entry for the generic caption itself.
-    const labelDocType = ocrDocType ?? docType;
+    // Label the card by the type OCR was actually run under, not the type the row is stored as.
+    // Two doc types differ: an address proof (DRIVING_LICENCE etc., chosen in a preceding question
+    // and passed in as ocrDocType) and COMPANY_PAN (always read as a PAN, mapped statically by
+    // registration.service.js). OCR_FIELD_LABELS has no entry for either stored caption, so
+    // without this the card lists no fields at all - which is how COMPANY_PAN uploads came back
+    // showing an empty extraction even though OCR had succeeded.
+    const labelDocType = ocrDocType ?? OCR_TYPE_BY_DOC_TYPE[docType] ?? docType;
 
     if (result.extracted) {
       typebotSessionStore.set(userId, {
