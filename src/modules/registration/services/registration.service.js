@@ -67,7 +67,10 @@ const DOC_TYPES = Object.freeze({
 // proofs - whose type comes from a preceding choice question, stashed per-session - this is static:
 // a company PAN is always OCR'd as a PAN (writing PANNo/Detail2), while the row keeps the honest
 // COMPANY_PAN caption so a human reviewer can tell the two apart.
-const OCR_TYPE_BY_DOC_TYPE = { COMPANY_PAN: 'PAN' };
+// Exported because the conversation engine has to apply the same mapping when it labels the
+// OCR-confirmation card - it only knows the stored docType, and looking up COMPANY_PAN in
+// OCR_FIELD_LABELS found nothing, so the card listed no fields at all.
+export const OCR_TYPE_BY_DOC_TYPE = { COMPANY_PAN: 'PAN' };
 // What gates /complete - NOC/COMPANY_DOC/PROFILE_PHOTO/CURRENT_ADDRESS_PROOF are
 // conditional/optional in the flow. Each entry is satisfied by *any one* of its types, because the
 // same real-world requirement is collected under a different doc type on each role path: an
@@ -97,7 +100,8 @@ const REQUIRED_DOC_GROUPS = [
 // saved as-is. PROFILE_PHOTO's passport-photo endpoint was briefly wired in but is not currently
 // working - reverted, see AGENTS.md. PASSPORT is likewise temporarily disabled - its OCR endpoint
 // currently has known issues on the provider's side - see AGENTS.md.
-const OCR_DOC_TYPES = [
+// Exported so a test can assert every OCR'd type has confirmation labels - see ocrLabels.test.js.
+export const OCR_DOC_TYPES = [
   DOC_TYPES.PAN,
   DOC_TYPES.AADHAAR,
   DOC_TYPES.BANK,
