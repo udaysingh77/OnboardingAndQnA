@@ -98,8 +98,10 @@ const REQUIRED_DOC_GROUPS = [
 ];
 // OCR runs for these - NOC/company docs/profile photos/address-proof-with-an-unsupported-type are
 // saved as-is. PROFILE_PHOTO's passport-photo endpoint was briefly wired in but is not currently
-// working - reverted, see AGENTS.md. PASSPORT is likewise temporarily disabled - its OCR endpoint
-// currently has known issues on the provider's side - see AGENTS.md.
+// working - reverted, see AGENTS.md. PASSPORT is live again - the provider-side
+// issues that had it disabled are fixed (re-verified against the running service: it reads the MRZ
+// and rejects a document of the wrong type). It matters more than the others - on the NRI paths the
+// passport IS the identity document, so it was the one required document with no check at all.
 // Exported so a test can assert every OCR'd type has confirmation labels - see ocrLabels.test.js.
 export const OCR_DOC_TYPES = [
   DOC_TYPES.PAN,
@@ -108,10 +110,11 @@ export const OCR_DOC_TYPES = [
   DOC_TYPES.DRIVING_LICENCE,
   DOC_TYPES.VOTER_ID,
   DOC_TYPES.ELECTRICITY,
+  DOC_TYPES.PASSPORT,
 ];
 // Doc types whose OCR `name` is trustworthy enough to become AccountName. Address proofs are
 // excluded on purpose: an electricity bill or a rent letter routinely carries someone else's name.
-const IDENTITY_OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR];
+const IDENTITY_OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR, DOC_TYPES.PASSPORT];
 // AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
 // Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
@@ -299,9 +302,27 @@ function parseOcrDate(value) {
 // `addressSlot` is the original docType saveDocument() was called with, before any ocrDocType
 // override - lets an address-proof upload's extracted address be routed to the right column
 // (PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF), independent of which OCR type actually ran.
+// The passport module names its fields differently from every other document: `dateOfBirth` not
+// `dob`, `sex` not `gender`, and `surname` + `givenName` instead of one `name`. Normalising once
+// here keeps the persistence below document-agnostic - the alternative was a docType check on every
+// one of those writes, and the DOB/gender ones would have silently done nothing until someone
+// noticed. Passport-only keys (passportNumber, dateOfExpiry, nationality) are left as they are.
+// Exported for ocrLabels.test.js - a pure function, and the passport field names are exactly
+// the kind of thing that breaks silently.
+export function normalizeExtracted(docType, extracted) {
+  if (docType !== DOC_TYPES.PASSPORT || !extracted) return extracted;
+  const fullName = [extracted.givenName, extracted.surname].filter(Boolean).join(' ').trim();
+  return {
+    ...extracted,
+    name: extracted.name ?? (fullName || undefined),
+    dob: extracted.dob ?? extracted.dateOfBirth,
+    gender: extracted.gender ?? extracted.sex,
+  };
+}
+
 async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlot) {
   try {
-    const extracted = await ocrProvider.extract({ docType, documentUrl });
+    const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl }));
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
       await registrationRepository.update(registrationId, { PANNo: extracted.pan, Detail2: extracted.pan });
@@ -345,6 +366,13 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     }
     if (extracted.gender) {
       await registrationRepository.update(registrationId, { Gender: extracted.gender });
+    }
+    // Only the passport carries this. The NRI path also asks for nationality in the chat and writes
+    // the same column - last write wins, which is what conversationFieldMap.js already says.
+    if (extracted.nationality) {
+      await registrationRepository.update(registrationId, {
+        Nationality: String(extracted.nationality).trim().slice(0, 100),
+      });
     }
     // Aadhaar's extracted number/name/dob/gender/address are intentionally not
     // persisted to AppAccounts - only used here to compute `verified`.
