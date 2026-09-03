@@ -131,6 +131,30 @@ function textMessage(id, text) {
   };
 }
 
+// Typebot drops the file name straight into the URL it hands back from generateUploadUrl, without
+// encoding it - and then rejects that same URL on the next answer, because a URL containing raw
+// spaces fails its own validation. Verified live: "Copy of Choira PAN.jpeg" produced
+// ".../blocks/<id>/Copy of Choira PAN.jpeg" and came back "Invalid message. Please, try again.",
+// while "pan.jpeg" went through. Phone file pickers hand over the original name, so this is exactly
+// the sort of name real members upload.
+//
+// Sanitising here rather than encoding the URL later: the same URL is stored in DocumentCaption and
+// is what ocr.choira.io is asked to fetch, so a clean name fixes every consumer at once. `#` and `?`
+// matter as much as spaces - they truncate a URL rather than just invalidating it.
+const MAX_FILE_NAME = 100;
+
+export function safeFileName(name) {
+  const raw = String(name ?? '').trim();
+  const dot = raw.lastIndexOf('.');
+  // Only treat a trailing dot group as an extension - a leading dot is a hidden file, not a name.
+  const hasExt = dot > 0 && dot < raw.length - 1;
+  const clean = (part) => part.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_{2,}/g, '_').replace(/^[._-]+|[._-]+$/g, '');
+
+  const stem = clean(hasExt ? raw.slice(0, dot) : raw).slice(0, MAX_FILE_NAME) || 'upload';
+  const ext = hasExt ? clean(raw.slice(dot + 1)).slice(0, 10) : '';
+  return ext ? `${stem}.${ext}` : stem;
+}
+
 // Shown when Typebot dropped an idle session and we started a fresh chat underneath the member.
 // Typebot has no "resume at block X", so the questions do start again - but everything already
 // answered is in our own database, not in Typebot's session, so say that plainly rather than
@@ -752,7 +776,7 @@ export async function handleUpload({ userId, token, file }) {
     upload = await typebotClient.generateUploadUrl({
       sessionId: session.sessionId,
       blockId,
-      fileName: file.originalname,
+      fileName: safeFileName(file.originalname),
       fileType: file.mimetype,
       fileSize: file.size,
     });
