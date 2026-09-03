@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OCR_FIELD_LABELS } from '../src/modules/conversation/engines/registrationEngine.js';
-import { OCR_DOC_TYPES, OCR_TYPE_BY_DOC_TYPE } from '../src/modules/registration/services/registration.service.js';
+import { OCR_DOC_TYPES, OCR_TYPE_BY_DOC_TYPE, normalizeExtracted } from '../src/modules/registration/services/registration.service.js';
 
 // The same resolution the engine does when labelling the card.
 const effectiveType = (docType) => OCR_TYPE_BY_DOC_TYPE[docType] ?? docType;
@@ -48,4 +48,45 @@ test('a doc type that is never OCR\'d needs no labels', () => {
   // NOC/PROFILE_PHOTO and friends fall through before the card is ever built.
   assert.equal(OCR_DOC_TYPES.includes('NOC'), false);
   assert.equal(OCR_TYPE_BY_DOC_TYPE.NOC, undefined);
+});
+
+// --- passport field normalisation ------------------------------------------
+
+test('passport field names are mapped onto the shared ones', () => {
+  // The passport module is the only one that returns surname/givenName, dateOfBirth and sex.
+  // Without this mapping the DOB, Gender and AccountName writes in runOcrAndPersist silently do
+  // nothing for a passport - the fields are simply absent under the names those writes look for.
+  const raw = {
+    documentType: 'PASSPORT',
+    passportNumber: 'Z1234567',
+    surname: 'DANISH',
+    givenName: 'SOHRAAB',
+    dateOfBirth: '14/04/1997',
+    dateOfExpiry: '13/04/2027',
+    nationality: 'INDIAN',
+    sex: 'M',
+    isValid: true,
+  };
+
+  const out = normalizeExtracted('PASSPORT', raw);
+  assert.equal(out.name, 'SOHRAAB DANISH', 'given name first, the way credits read');
+  assert.equal(out.dob, '14/04/1997');
+  assert.equal(out.gender, 'M');
+  // Passport-only fields are left alone - the confirmation card shows them.
+  assert.equal(out.passportNumber, 'Z1234567');
+  assert.equal(out.dateOfExpiry, '13/04/2027');
+  assert.equal(out.nationality, 'INDIAN');
+});
+
+test('a half-read passport does not invent a name', () => {
+  const onlySurname = normalizeExtracted('PASSPORT', { surname: 'DANISH' });
+  assert.equal(onlySurname.name, 'DANISH');
+  const neither = normalizeExtracted('PASSPORT', { passportNumber: 'Z1' });
+  assert.equal(neither.name, undefined, 'no name at all, rather than an empty string');
+});
+
+test('every other document is passed through untouched', () => {
+  const pan = { pan: 'ABCDE1234F', name: 'REAL NAME', dob: '01/01/1990' };
+  assert.equal(normalizeExtracted('PAN', pan), pan, 'same object, not a copy');
+  assert.equal(normalizeExtracted('PASSPORT', null), null);
 });

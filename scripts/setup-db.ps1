@@ -93,6 +93,11 @@ IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$AppUser')
     CREATE LOGIN [$AppUser] WITH PASSWORD = N'$AppPass', CHECK_POLICY = OFF, DEFAULT_DATABASE = [master];
 IF DB_ID(N'$DbName') IS NULL
     CREATE DATABASE [$DbName];
+-- SQL Express defaults AUTO_CLOSE ON for a database created this way. With it on, SQL Server shuts
+-- the database down once the last connection closes and reopens it on the next connect - which
+-- takes seconds and can fail outright, surfacing as Prisma P1001 "Can't reach database server"
+-- after any idle gap. Always off for a service database.
+ALTER DATABASE [$DbName] SET AUTO_CLOSE OFF;
 "@
 & $sqlcmd -S $conn -E -b -C -Q $setupSql
 if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create login/database (exit $LASTEXITCODE)." }

@@ -113,6 +113,27 @@ async function uploadToPresignedUrl({ presignedUrl, formData, fileBuffer, fileNa
   }
 }
 
+// --- Expired sessions -------------------------------------------------------
+//
+// Typebot drops idle chat sessions (observed live: a session went 20m51s without a turn and the
+// next continueChat 404'd). We hold the sessionId in memory, so without this the same dead id is
+// resent on every following message and the member is wedged permanently - the only cure being a
+// server restart. See AGENTS.md.
+//
+// The two endpoints report it differently, confirmed by calling both with a bogus sessionId:
+//   continueChat       404 { code: 'NOT_FOUND',   message: 'Session not found.' }
+//   generateUploadUrl  400 { code: 'BAD_REQUEST', message: "Can't find session" }
+// so matching on 404 alone would miss uploads.
+//
+// Deliberately narrow. A 404 from startChat means TYPEBOT_ID is wrong, which must keep failing
+// loudly rather than being retried as a "stale session" - callers only consult this around
+// continueChat/generateUploadUrl.
+export function isDeadSessionError(err) {
+  if (err?.errorCode !== 'TYPEBOT_REQUEST_FAILED') return false;
+  if (err.statusCode !== 404 && err.statusCode !== 400) return false;
+  return /session not found|can'?t find session/i.test(String(err.message ?? ''));
+}
+
 export const typebotClient = {
   startChat,
   continueChat,

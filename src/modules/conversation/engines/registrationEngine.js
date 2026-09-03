@@ -11,7 +11,7 @@
 import { badRequestError } from '../../../shared/errors.js';
 import { logger } from '../../../utils/logger.js';
 import { registrationService, OCR_TYPE_BY_DOC_TYPE } from '../../registration/services/registration.service.js';
-import { typebotClient } from '../services/typebot/typebotClient.js';
+import { typebotClient, isDeadSessionError } from '../services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../services/typebot/typebotSessionStore.js';
 import { resolveDocumentType } from '../services/typebot/documentTypeMap.js';
 import { resolveConversationField } from '../services/typebot/conversationFieldMap.js';
@@ -91,9 +91,16 @@ export const OCR_FIELD_LABELS = {
     state: 'State',
     assemblyConstituency: 'Assembly Constituency',
   },
-  // PASSPORT: temporarily disabled (see registration.service.js's OCR_DOC_TYPES) - endpoint has
-  // known issues on the provider's side. No entry needed here since buildOcrConfirmationMessages()
-  // is never called with docType === 'PASSPORT' while that's the case - see AGENTS.md to re-enable.
+  // `name` and `dob` are composed by normalizeExtracted() in registration.service.js - the passport
+  // module itself returns surname/givenName and dateOfBirth. passportNumberValid (the MRZ check
+  // digit) is deliberately not shown: it is provenance for staff, not something a member confirms.
+  PASSPORT: {
+    name: 'Name',
+    passportNumber: 'Passport Number',
+    dob: 'Date of Birth',
+    dateOfExpiry: 'Valid Till',
+    nationality: 'Nationality',
+  },
   //
   // Same caveat as PAN/DRIVING_LICENCE above - collection only documents "Bill name + address" for
   // ELECTRICITY, not yet confirmed against a real success response.
@@ -122,6 +129,20 @@ function textMessage(id, text) {
     type: 'text',
     content: { type: 'richText', richText: [{ type: 'p', children: [{ text }] }] },
   };
+}
+
+// Shown when Typebot dropped an idle session and we started a fresh chat underneath the member.
+// Typebot has no "resume at block X", so the questions do start again - but everything already
+// answered is in our own database, not in Typebot's session, so say that plainly rather than
+// letting them think the uploads are gone.
+function describeSessionRestart() {
+  return "You were away for a while, so the chat timed out and we've started it again. Nothing you already sent is lost - your uploaded documents and answers are saved.";
+}
+
+// Same situation, but hit on a file upload. The file can't be re-aimed at a chat that no longer has
+// that question, so we don't silently restart here - we hand the next turn back to handle().
+function describeSessionRestartOnUpload() {
+  return "You were away for a while, so the chat timed out and this file wasn't attached. Your earlier documents and answers are saved - send any message to carry on, and we'll ask for it again.";
 }
 
 function buildOcrConfirmationMessages(docType, extracted) {
@@ -583,20 +604,41 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
   // text may be empty. Mirror the widget's behavior exactly.
   const text = message ?? (attachedFileUrls?.length ? attachedFileUrls.join(', ') : '');
 
-  const response = existing
-    ? await typebotClient.continueChat({
+  const beginChat = () => typebotClient.startChat({ prefilledVariables: { token, registrationId: userId } });
+
+  // The question this `message` is answering. Captured before the relay because an expired session
+  // drops `existing` - the answer is still valid and still worth persisting, even though Typebot
+  // has forgotten where it asked it.
+  const answeredInput = existing?.input;
+  let sessionExpired = false;
+  let response;
+
+  if (existing) {
+    try {
+      response = await typebotClient.continueChat({
         sessionId: existing.sessionId,
         message: { type: 'text', text, attachedFileUrls },
-      })
-    : await typebotClient.startChat({
-        prefilledVariables: { token, registrationId: userId },
       });
+    } catch (err) {
+      if (!isDeadSessionError(err)) throw err;
+      // Typebot dropped the session while the member was idle. Without this the same dead id goes
+      // out on every later message and they can never get out - see typebotClient.isDeadSessionError.
+      // One restart only: beginChat() failing is a real failure and must surface.
+      logger.warn({ userId, sessionId: existing.sessionId }, 'Typebot session expired - restarting the conversation');
+      typebotSessionStore.clear(userId);
+      existing = null;
+      sessionExpired = true;
+      response = await beginChat();
+    }
+  } else {
+    response = await beginChat();
+  }
 
-  // `message` answers the question the user was just asked (existing.input),
+  // `message` answers the question the user was just asked (answeredInput),
   // not the new one in `response.input` - persist it before overwriting the session.
   let addressProofOcrType;
-  if (existing?.input && message) {
-    const field = resolveConversationField(existing.input.options?.variableId);
+  if (answeredInput && message) {
+    const field = resolveConversationField(answeredInput.options?.variableId);
     if (field) {
       try {
         await registrationService.saveConversationField(userId, userId, field, message);
@@ -609,7 +651,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     // proof - the paired file-upload question (next turn) has no way to know this on its own,
     // since the upload lands in one shared variable regardless of type. Consulted by
     // handleUpload() to decide OCR routing (see addressProofTypeMap.js).
-    if (isAddressProofTypeStep(existing.input.options?.variableId)) {
+    if (isAddressProofTypeStep(answeredInput.options?.variableId)) {
       addressProofOcrType = resolveAddressProofOcrType(message);
       if (addressProofOcrType === null && !isManualAddressAnswer(message)) {
         logger.warn({ userId, message }, 'Address-proof type answer did not resolve to an OCR type');
@@ -646,9 +688,13 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     });
   }
 
-  const messages = workLinkNotice
-    ? [textMessage('work-link-cap', workLinkNotice), ...(response.messages ?? [])]
-    : (response.messages ?? []);
+  // Notices that explain something about *this* turn, above whatever Typebot said. The expiry one
+  // goes first: it explains why the member is suddenly looking at the first question again.
+  const notices = [
+    ...(sessionExpired ? [textMessage('session-expired', describeSessionRestart())] : []),
+    ...(workLinkNotice ? [textMessage('work-link-cap', workLinkNotice)] : []),
+  ];
+  const messages = notices.length ? [...notices, ...(response.messages ?? [])] : (response.messages ?? []);
 
   // Typebot just offered the payment button. Hold it back one turn and show the member everything
   // on file first - much of it was read off their documents by OCR rather than typed, and this is
@@ -701,13 +747,41 @@ export async function handleUpload({ userId, token, file }) {
   const { id: blockId, options } = session.input;
   const variableId = options?.variableId;
 
-  const { presignedUrl, formData, fileUrl } = await typebotClient.generateUploadUrl({
-    sessionId: session.sessionId,
-    blockId,
-    fileName: file.originalname,
-    fileType: file.mimetype,
-    fileSize: file.size,
-  });
+  let upload;
+  try {
+    upload = await typebotClient.generateUploadUrl({
+      sessionId: session.sessionId,
+      blockId,
+      fileName: file.originalname,
+      fileType: file.mimetype,
+      fileSize: file.size,
+    });
+  } catch (err) {
+    if (!isDeadSessionError(err)) throw err;
+    // Typebot expired the session while the member was picking a file. `blockId` belongs to a
+    // question that no longer exists, so this upload cannot be salvaged - but leaving the dead
+    // session in the store would wedge every later message too. Restart the chat so they land on a
+    // real question with a working input, and say why the file didn't go through.
+    logger.warn({ userId, sessionId: session.sessionId }, 'Typebot session expired during upload - restarting the conversation');
+    typebotSessionStore.clear(userId);
+
+    const restarted = await typebotClient.startChat({ prefilledVariables: { token, registrationId: userId } });
+    if (restarted.input) {
+      typebotSessionStore.set(userId, { sessionId: restarted.sessionId, input: restarted.input });
+    }
+
+    return {
+      sessionEnded: !restarted.input,
+      messages: [
+        textMessage('session-expired-upload', describeSessionRestartOnUpload()),
+        ...(restarted.messages ?? []),
+      ],
+      input: restarted.input,
+      progress: restarted.input ? resolveProgress(restarted.input.id) : 100,
+    };
+  }
+
+  const { presignedUrl, formData, fileUrl } = upload;
 
   await typebotClient.uploadToPresignedUrl({
     presignedUrl,
