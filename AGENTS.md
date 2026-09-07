@@ -491,6 +491,61 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
     non-decreasing regardless of which branch a user takes. Update this map if Studio changes the
     flow's questions or branches.
 
+## Music Credits Service (work links)
+
+`modules/work/services/musicCredits.service.js` calls the in-house credits service
+(`MUSIC_CREDITS_API_BASE_URL`, default `https://spotify.choira.in`) — one endpoint,
+`GET /resolve?url=<any Spotify or YouTube link>`, which auto-detects the platform. It is the first
+source this app has that reports **what a credited person actually did**:
+
+- **Spotify** — `contributors[]`, each with a `role` (`Main Artist`, `Composer`, `Lyricist`,
+  `Producer`) and a `role_group`. Read server-side from Spotify's own credits.
+- **YouTube** — the video **description** (the label's own credit block) structured into
+  `singers`/`composers`/`lyricists`/`producers`/`musicians`/`engineers`/`others`. Note: the
+  description, not the title — a real credit list rather than a guess at one.
+
+**This is what changed the "grounded data only" rule.** `Author_Composer` and `Author_Lyricist` were
+historically left null because Spotify returned one unlabelled bag of artists and a YouTube title is
+a sentence. Both are now written — *only* from this service's role-labelled output. When it has
+nothing, they stay null exactly as before. The artist bag and the video title still never fill them.
+`LanguageNames`, `WorkCategory` and `DocLink` remain null always — nothing we call sources them.
+
+**Hybrid on the Spotify path.** The credits response carries no album name, release date or ISRC, so
+`workLinkResolver.resolveSpotify()` calls the credits service *and* `spotifyService.getTrackMetadata()`
+in parallel (`Promise.allSettled`) and merges: song/artists/writers from credits,
+`filmOrAlbum`/`releaseYear` from the Web API, publisher from credits `source` falling back to the
+album's P-line copyright. Either half may fail; only both failing throws.
+
+> **Known live issue:** the Spotify Web API currently returns **403** for this project's credentials —
+> *"Active premium subscription required for the owner of the app."* The client id/secret are valid
+> (the token call succeeds), but `/v1/tracks/{id}` is refused until the account owning the Spotify
+> app holds an active Premium subscription. Until then `Film_AlbumName` and `ReleaseYear` are null
+> for Spotify links, and the resolver logs `Spotify Web API failed; using credits only`. The code
+> self-heals the moment access is restored — nothing needs changing.
+
+**Never throws, always degrades.** `fetchCredits()` returns `null` for every failure — disabled,
+unreachable, non-200, unparseable, or no credits found — and the resolver falls back to the old pair
+(Spotify Web API / oEmbed + Gemini-on-title). A member must never be blocked on the work-link step by
+a metadata outage. `MUSIC_CREDITS_ENABLED=false` is the kill-switch, same shape as `OCR_ENABLED`.
+
+**Two response quirks it normalises**, both verified live and both covered by `test/musicCredits.test.js`:
+
+- `"N/A"` is the null sentinel on the Spotify path — an unknown track id answers **200** with
+  `song_name: "N/A"` and `__typename: "NotFound"`, not a 404.
+- `credits.song` / `credits.album_or_movie` arrive as `[]` rather than a string when a video has no
+  credit block.
+
+`hasUsableCredits()` therefore judges on **credited people**, not on a song name: both empty cases
+still return a name (an unknown id returns `"N/A"`, a lecture echoes its own title as `song_name`), so
+only a real credit list separates a song from a TED talk.
+
+> **Caveat, pre-existing and unchanged by this work:** with `GEMINI_API_KEY` blank, the fallback
+> title path returns `isMusicVideo: true` for everything (`parsed ? parsed.isMusicVideo : true`), so a
+> non-music video that the credits service declined still reaches the confirmation card. The credits
+> service correctly reports no credits for it; the title path is what can't tell. Configure
+> `GEMINI_API_KEY`, or teach the resolver to treat "credits service answered, found nothing" as a
+> rejection, if this matters.
+
 ## Spotify Credit Verification
 
 `POST /spotify/metadata` (`modules/spotify/`, behind `authenticate`) — given `{ url, actualName,

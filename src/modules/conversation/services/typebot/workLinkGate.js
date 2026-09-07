@@ -79,13 +79,20 @@ export function describeSong(resolved) {
   if (resolved.artists?.length) lines.push(`Artist: ${resolved.artists.join(', ')}`);
   if (resolved.filmOrAlbum) lines.push(`Film/Album: ${resolved.filmOrAlbum}`);
   if (resolved.releaseYear) lines.push(`Released: ${resolved.releaseYear}`);
+  // Role-labelled credits, shown only when the credits service supplied them. These are the two
+  // lines a songwriter is most likely to check, and the ones that end up in the register.
+  if (resolved.composers?.length) lines.push(`Composer: ${resolved.composers.join(', ')}`);
+  if (resolved.lyricists?.length) lines.push(`Lyricist: ${resolved.lyricists.join(', ')}`);
   return `${lines.join('\n')}\n\nIs this your song?`;
 }
 
 // Members are invited to give more than one name: a legal name, a stage name and an abbreviation
 // are all common, and every name they give is stored so their next links match without asking again.
 export function describeCredits(resolved) {
-  const credits = resolved.artists?.length ? resolved.artists.join(', ') : resolved.channelName;
+  // Every credited name the platform reported, so a member credited only as the lyricist sees
+  // themselves in the list. Falls back to the performers, then the channel.
+  const listed = resolved.credits?.length ? resolved.credits : resolved.artists;
+  const credits = listed?.length ? listed.join(', ') : resolved.channelName;
   const ask = 'What name (or names) are you credited under? You can enter several, separated by commas.';
   return credits
     ? `We couldn't find your name in this song's credits. It lists: ${credits}.\n\n${ask}`

@@ -6,10 +6,18 @@
 // Moved here from modules/spotify: links now arrive from Spotify *or*
 // YouTube, so this is no longer Spotify's business.
 //
-// Only grounded metadata is written. Author_Composer, Author_Lyricist,
-// LanguageNames, WorkCategory and DocLink stay null on purpose - nothing
-// we call can source them truthfully, and for a rights society an empty
-// column is safer than an invented credit. Staff fill those in.
+// Only grounded metadata is written.
+//
+// Author_Composer and Author_Lyricist ARE now filled, from the
+// role-labelled credits the credits service returns (Spotify's own
+// contributor roles, or the credit block in a YouTube description) - see
+// musicCredits.service.js. They stay null whenever that service had
+// nothing to say, which is the same rule as before rather than a
+// relaxation of it: a labelled credit is written, a guess never is.
+//
+// LanguageNames, WorkCategory and DocLink still stay null on purpose -
+// nothing we call can source them truthfully, and for a rights society
+// an empty column is safer than an invented credit. Staff fill those in.
 // ==================================================================
 import { workRepository } from '../repositories/work.repository.js';
 
@@ -26,7 +34,15 @@ export const MATCH_MARKERS = Object.freeze({
 });
 
 // SQL Server column widths - a value that overflows fails the whole insert, so clip here.
-const LIMITS = { SongName: 100, Film_AlbumName: 100, Artist_Singers: 500, Publisher: 100, DigitalLink: 500 };
+const LIMITS = {
+  SongName: 100,
+  Film_AlbumName: 100,
+  Artist_Singers: 500,
+  Publisher: 100,
+  DigitalLink: 500,
+  Author_Composer: 100,
+  Author_Lyricist: 100,
+};
 
 function clip(value, max) {
   if (typeof value !== 'string') return null;
@@ -49,10 +65,20 @@ async function saveWorkLink({ userId, resolved, matched }) {
     Film_AlbumName: clip(resolved?.filmOrAlbum, LIMITS.Film_AlbumName),
     Artist_Singers: clip(artists.join(', '), LIMITS.Artist_Singers),
     Publisher: clip(resolved?.publisher, LIMITS.Publisher),
+    Author_Composer: clip(joinNames(resolved?.composers), LIMITS.Author_Composer),
+    Author_Lyricist: clip(joinNames(resolved?.lyricists), LIMITS.Author_Lyricist),
     DigitalLink: clip(resolved?.url, LIMITS.DigitalLink),
     ReleaseYear: Number.isInteger(resolved?.releaseYear) ? BigInt(resolved.releaseYear) : null,
     CreatedBy: matched ? MATCH_MARKERS.MATCHED : MATCH_MARKERS.UNVERIFIED,
   });
+}
+
+// Several people share one 100-character column, so join them and let clip() take the overflow.
+// Returns null for an empty list, keeping "we had no credits" distinct from an empty string.
+function joinNames(value) {
+  if (!Array.isArray(value)) return null;
+  const list = [...new Set(value.filter((name) => typeof name === 'string' && name.trim()))];
+  return list.length ? list.map((name) => name.trim()).join(', ') : null;
 }
 
 async function countWorkLinks(userId) {

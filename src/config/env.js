@@ -53,8 +53,22 @@ const envSchema = z.object({
   SPOTIFY_CLIENT_ID: z.string().optional(),
   SPOTIFY_CLIENT_SECRET: z.string().optional(),
 
-  // Work links (the songs a member claims). YouTube metadata comes from the keyless oEmbed
-  // endpoint - there is no YouTube Data API key for this project, see work/services/youtube.service.js.
+  // Work links (the songs a member claims). Role-labelled credits come from the in-house
+  // credits service (see work/services/musicCredits.service.js); the oEmbed + Gemini pair below
+  // is the fallback for when it can't answer.
+  MUSIC_CREDITS_API_BASE_URL: z.string().default('https://spotify.choira.in'),
+  // Pathfinder + InnerTube + Gemini happen behind this one call, so it is slower than a plain
+  // metadata fetch - a YouTube resolve measured ~10-20s.
+  MUSIC_CREDITS_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  // Kill-switch: false skips the credits service entirely and uses the oEmbed/Gemini + Spotify
+  // Web API path alone. Same shape as OCR_ENABLED - z.coerce.boolean() would treat "false" as true.
+  MUSIC_CREDITS_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
+
+  // YouTube metadata comes from the keyless oEmbed endpoint - there is no YouTube Data API key
+  // for this project, see work/services/youtube.service.js.
   YOUTUBE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   // Gemini splits a YouTube title into song/artists/album. Optional: leave GEMINI_API_KEY blank and
   // the flow falls back to the raw video title instead of breaking.

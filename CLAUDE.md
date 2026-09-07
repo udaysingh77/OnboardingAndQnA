@@ -28,7 +28,7 @@ Note: `README.md` describes an earlier MySQL-based design; the project has since
 - **Helmet**, **CORS**, **express-rate-limit**, **multer** (memory storage, only on `POST /conversation/upload`)
 - **Pino / pino-http** logging
 - **bcryptjs**, **http-status-codes**, **dotenv**
-- Real external services: **`ocr.choira.io`** (PAN/Aadhaar/bank OCR), **Typebot Chat API** (`typebot.io` or self-hosted) — both via plain `fetch`, no SDK
+- Real external services: **`ocr.choira.io`** (PAN/Aadhaar/bank OCR), **`spotify.choira.in`** (role-labelled song credits for Spotify + YouTube work links), **Typebot Chat API** (`typebot.io` or self-hosted) — all via plain `fetch`, no SDK
 - Tests via **`node:test`**
 
 ## Commands
@@ -77,6 +77,7 @@ src/
 │  ├─ user/         controllers/services/repositories/validators
 │  ├─ registration/ controllers/services/repositories/validators + services/ocr/{interface,factory,http,stub}
 │  ├─ conversation/ services/{conversation.router,typebot/*} + engines/{aiEngine,registrationEngine}.js
+│  ├─ work/         services/{workLinkResolver,musicCredits,youtube,gemini,workLink,workMatch}.service.js
 │  └─ health/
 ├─ app.js           middleware + route assembly (order: security → parsing → logging → routes → 404 → errors)
 └─ server.js        DB connectivity check (fail-fast) + bootstrap + graceful shutdown
@@ -147,6 +148,9 @@ Always call `.parse` (not `.safeParse`); a thrown `ZodError` is caught by `async
 - `config/env.js` reads `.env` and validates via Zod, failing fast on boot. **Adding an env var means updating three places: `.env`, `.env.example`, and `envSchema` in `config/env.js`.**
 - Key vars: `PORT`, `DATABASE_URL`, `JWT_SECRET` (≥16 chars), `JWT_EXPIRES_IN`, `JWT_ISSUER`, `CORS_ORIGIN`, `OTP_PROVIDER` (`mock`|`sms`), `OTP_TTL_SECONDS`, `OTP_MOCK_VALUE` (dev-only fixed OTP), `MSG91_AUT_KEY`, `MSG91_TEMP_ID`, `MSG91_OTP_LENGTH`, `MSG91_OTP_EXPIRY`, plus global/auth rate-limit values.
 - OCR: `OCR_PROVIDER` (`http`|`stub`), `OCR_API_BASE_URL`, `OCR_REQUEST_TIMEOUT_MS`.
+- Music credits: `MUSIC_CREDITS_API_BASE_URL` (default `https://spotify.choira.in`),
+  `MUSIC_CREDITS_REQUEST_TIMEOUT_MS`, `MUSIC_CREDITS_ENABLED` (kill-switch) — the role-labelled
+  credits source behind `Author_Composer`/`Author_Lyricist`, see AGENTS.md's "Music Credits Service".
 - Typebot: `TYPEBOT_API_BASE_URL`, `TYPEBOT_ID`, `TYPEBOT_PREVIEW_MODE` (test an unpublished bot via its internal id — see AGENTS.md), `TYPEBOT_API_TOKEN` (optional), `TYPEBOT_REQUEST_TIMEOUT_MS`, `MAX_UPLOAD_SIZE_MB`.
 - Never commit real `.env` (git-ignored); keep `.env.example` in sync with any new key.
 
