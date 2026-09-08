@@ -494,57 +494,78 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
 ## Music Credits Service (work links)
 
 `modules/work/services/musicCredits.service.js` calls the in-house credits service
-(`MUSIC_CREDITS_API_BASE_URL`, default `https://spotify.choira.in`) — one endpoint,
-`GET /resolve?url=<any Spotify or YouTube link>`, which auto-detects the platform. It is the first
-source this app has that reports **what a credited person actually did**:
+(`MUSIC_CREDITS_API_BASE_URL`, default `https://spotify.choira.in`). **One endpoint per platform** —
+the resolver already knows which it has, so the provider-specific route is used rather than the
+auto-detecting `/resolve`:
 
-- **Spotify** — `contributors[]`, each with a `role` (`Main Artist`, `Composer`, `Lyricist`,
-  `Producer`) and a `role_group`. Read server-side from Spotify's own credits.
-- **YouTube** — the video **description** (the label's own credit block) structured into
-  `singers`/`composers`/`lyricists`/`producers`/`musicians`/`engineers`/`others`. Note: the
-  description, not the title — a real credit list rather than a guess at one.
+| | endpoint | what comes back |
+|---|---|---|
+| Spotify | `GET /credits?track=<url>` | **structured** — `contributors[]`, each with a `role` (`Main Artist`, `Composer`, `Lyricist`, `Producer`) and a `role_group`, read server-side from Spotify's own credits |
+| YouTube | `GET /youtube/raw?url=<url>` | **raw InnerTube** — nothing structured; this module parses it |
+
+It is the first source this app has that reports **what a credited person actually did**.
 
 **This is what changed the "grounded data only" rule.** `Author_Composer` and `Author_Lyricist` were
 historically left null because Spotify returned one unlabelled bag of artists and a YouTube title is
-a sentence. Both are now written — *only* from this service's role-labelled output. When it has
-nothing, they stay null exactly as before. The artist bag and the video title still never fill them.
-`LanguageNames`, `WorkCategory` and `DocLink` remain null always — nothing we call sources them.
+a sentence. Both are now written — *only* from role-labelled output. When there is none, they stay
+null exactly as before. `LanguageNames`, `WorkCategory` and `DocLink` remain null always.
 
-**Hybrid on the Spotify path.** The credits response carries no album name, release date or ISRC, so
-`workLinkResolver.resolveSpotify()` calls the credits service *and* `spotifyService.getTrackMetadata()`
-in parallel (`Promise.allSettled`) and merges: song/artists/writers from credits,
-`filmOrAlbum`/`releaseYear` from the Web API, publisher from credits `source` falling back to the
-album's P-line copyright. Either half may fail; only both failing throws.
+### Reading the raw YouTube response
 
-> **Known live issue:** the Spotify Web API currently returns **403** for this project's credentials —
+`findRenderer()` searches by renderer name rather than walking a hardcoded path — InnerTube moves its
+nesting between builds, and a fixed path breaks silently. Two renderers matter:
+
+- `musicResponsiveHeaderRenderer` → `title` (the *clean* song name, not the marketing video title),
+  `straplineTextOne` (artist), `subtitle` (`"626M views • Nov 7, 2022"`). **That subtitle is the only
+  release date YouTube gives us** — oEmbed carried none, so YouTube links can now fill `ReleaseYear`.
+- `musicDescriptionShelfRenderer` → the label's own credit block, parsed by label
+  (`Song:`, `Movie:`, `Singers:`, `Music:`, `Lyrics:`).
+
+**`CREDIT_LABELS` is deliberately narrow, and "Written by" is excluded on purpose.** In a film
+description that is the screenwriter, sitting next to `Directed by:`/`Produced by:` — not the
+lyricist. A wrong name in `Author_Lyricist` is a wrong name in a rights register. Only labels that
+unambiguously name a *song* credit may fill those columns. Every other labelled name still lands in
+`allCredits`, which only decides whether the member is asked for an alias — generous there is safe,
+generous in the register is not. `test/musicCredits.test.js` pins this.
+
+> **A music page is NOT an isMusicVideo test.** `/youtube/raw` answers with an ordinary watch page
+> for a TED talk — but *also* for a real song that simply isn't on YouTube Music (verified live:
+> "Chaleya" returns no music renderer at all). So "no music renderer" means only *no credits from
+> this source*; the resolver falls back to the title path rather than rejecting a member's genuine
+> work. **Do not "optimise" this into a rejection.**
+
+### Hybrid on the Spotify path
+
+The credits response carries no album name, release date or ISRC, so `resolveSpotify()` calls the
+credits service *and* `spotifyService.getTrackMetadata()` in parallel (`Promise.allSettled`) and
+merges: song/artists/writers from credits, `filmOrAlbum`/`releaseYear` from the Web API, publisher
+from credits `source` falling back to the album's P-line copyright. Either half may fail; only both
+failing throws.
+
+> **Known live issue:** the Spotify Web API returns **403** for this project's credentials —
 > *"Active premium subscription required for the owner of the app."* The client id/secret are valid
 > (the token call succeeds), but `/v1/tracks/{id}` is refused until the account owning the Spotify
 > app holds an active Premium subscription. Until then `Film_AlbumName` and `ReleaseYear` are null
-> for Spotify links, and the resolver logs `Spotify Web API failed; using credits only`. The code
-> self-heals the moment access is restored — nothing needs changing.
+> for Spotify links, and the resolver logs this at **info**, not warn — it is fully handled, the link
+> still resolves from credits, and a warn-with-stack on every Spotify link made a working system look
+> broken. `spotify.choira.in` itself never failed here. The code self-heals when access returns.
 
-**Never throws, always degrades.** `fetchCredits()` returns `null` for every failure — disabled,
-unreachable, non-200, unparseable, or no credits found — and the resolver falls back to the old pair
-(Spotify Web API / oEmbed + Gemini-on-title). A member must never be blocked on the work-link step by
-a metadata outage. `MUSIC_CREDITS_ENABLED=false` is the kill-switch, same shape as `OCR_ENABLED`.
+### Degradation
 
-**Two response quirks it normalises**, both verified live and both covered by `test/musicCredits.test.js`:
+`fetchSpotifyCredits()` / `fetchYoutubeCredits()` **never throw**. Every failure returns `null` —
+disabled, unreachable, non-200 (422 is "not a Spotify or YouTube link"), unparseable, or no credits
+found — and the resolver falls back to the Spotify Web API / oEmbed + Gemini pair. A member must
+never be blocked on the work-link step by a metadata outage. `MUSIC_CREDITS_ENABLED=false` is the
+kill-switch, same shape as `OCR_ENABLED`.
 
-- `"N/A"` is the null sentinel on the Spotify path — an unknown track id answers **200** with
-  `song_name: "N/A"` and `__typename: "NotFound"`, not a 404.
-- `credits.song` / `credits.album_or_movie` arrive as `[]` rather than a string when a video has no
-  credit block.
+`"N/A"` is the Spotify path's null sentinel: an unknown track id answers **200** with
+`song_name: "N/A"` and `__typename: "NotFound"`, not a 404. `hasUsableCredits()` therefore judges on
+**credited people**, not on a song name — both empty cases still return a name.
 
-`hasUsableCredits()` therefore judges on **credited people**, not on a song name: both empty cases
-still return a name (an unknown id returns `"N/A"`, a lecture echoes its own title as `song_name`), so
-only a real credit list separates a song from a TED talk.
-
-> **Caveat, pre-existing and unchanged by this work:** with `GEMINI_API_KEY` blank, the fallback
-> title path returns `isMusicVideo: true` for everything (`parsed ? parsed.isMusicVideo : true`), so a
-> non-music video that the credits service declined still reaches the confirmation card. The credits
-> service correctly reports no credits for it; the title path is what can't tell. Configure
-> `GEMINI_API_KEY`, or teach the resolver to treat "credits service answered, found nothing" as a
-> rejection, if this matters.
+> **Caveat, pre-existing:** with `GEMINI_API_KEY` blank, the fallback title path returns
+> `isMusicVideo: true` for everything (`parsed ? parsed.isMusicVideo : true`), so a non-music video
+> reaches the confirmation card. Configure `GEMINI_API_KEY` if this matters; there is no
+> deterministic substitute, for the "Chaleya" reason above.
 
 ## Spotify Credit Verification
 
