@@ -14,13 +14,15 @@
 //
 // The in-house credits service (musicCredits.service.js) is the primary
 // source for both platforms, because it is the only one that reports
-// ROLES. Spotify's Web API is still called alongside it for the Spotify
-// path, because credits carry no album or release date:
+// ROLES. Each platform has its own endpoint there. Spotify's Web API is
+// still called alongside it, because Spotify credits carry no album or
+// release date:
 //
 //   songName, artists, composers, lyricists, producers  - credits service
-//   filmOrAlbum, releaseYear                            - Spotify Web API
-//   publisher                       - credits service `source`, else the
-//                                     album's P-line copyright
+//   filmOrAlbum, releaseYear   - Spotify Web API on the Spotify path;
+//                                the InnerTube music header on YouTube's
+//   publisher                  - credits service `source`, else the
+//                                album's P-line copyright
 //
 // Every credits-service field degrades: if it is disabled, unreachable,
 // or has nothing for the link, the resolver falls back entirely to the
@@ -37,7 +39,7 @@
 import { spotifyService } from '../../spotify/services/spotify.service.js';
 import { fetchYoutubeVideo, isYoutubeUrl } from './youtube.service.js';
 import { parseVideoTitle } from './gemini.service.js';
-import { fetchCredits } from './musicCredits.service.js';
+import { fetchSpotifyCredits, fetchYoutubeCredits } from './musicCredits.service.js';
 import { logger } from '../../../utils/logger.js';
 
 export const PROVIDERS = Object.freeze({ SPOTIFY: 'spotify', YOUTUBE: 'youtube' });
@@ -87,9 +89,9 @@ function roleFields(credits) {
 }
 
 // Runs the credits service without letting its failure take the resolve down with it.
-async function creditsFor(url) {
+async function creditsFor(fetchFn, url) {
   try {
-    return await fetchCredits(url);
+    return await fetchFn(url);
   } catch (err) {
     logger.warn({ err, url }, 'Credits lookup failed, continuing without role-labelled credits');
     return null;
@@ -100,7 +102,7 @@ async function resolveSpotify(url) {
   // Both are independent lookups of the same track - run them together rather than in series, so
   // adding credits doesn't add its latency to the member's wait.
   const [creditsResult, trackResult] = await Promise.allSettled([
-    creditsFor(url),
+    creditsFor(fetchSpotifyCredits, url),
     spotifyService.getTrackMetadata(url),
   ]);
 
@@ -111,7 +113,14 @@ async function resolveSpotify(url) {
   // credits hit alone is still a usable answer. Only give up when neither responded.
   if (!track && !credits) throw trackResult.reason;
   if (!track) {
-    logger.warn({ url, err: trackResult.reason }, 'Spotify Web API failed; using credits only (no album/year)');
+    // Expected and fully handled while the Spotify app's Premium entitlement is lapsed (403 on
+    // every /v1/tracks call - see AGENTS.md). Logged at info, without the stack: the member's link
+    // resolved fine from credits, only album/year are missing, and a warn-with-stack on every
+    // Spotify link makes a working system look broken. The credits service itself never failed here.
+    logger.info(
+      { url, reason: trackResult.reason?.errorCode ?? trackResult.reason?.message },
+      'Spotify Web API unavailable; resolved from credits alone (no album/year)',
+    );
   }
 
   const webApiArtists = track ? track.artists.map((artist) => artist.name).filter(Boolean) : [];
@@ -172,10 +181,13 @@ async function resolveYoutubeFromTitle(url) {
 }
 
 async function resolveYoutube(url) {
-  const credits = await creditsFor(url);
+  const credits = await creditsFor(fetchYoutubeCredits, url);
 
-  // No credit block means either a non-music video or a description that never listed one. Both are
-  // answered better by the title path, which can still say "this isn't a song".
+  // No music page. TEMPTING BUT WRONG to treat this as "not a song": /youtube/raw answers with an
+  // ordinary watch page for a TED talk, but ALSO for real songs that simply aren't on YouTube Music
+  // (verified: "Chaleya" comes back with no music renderer at all). Rejecting on this signal would
+  // throw out members' genuine work. It only means "no credits from here" - so fall through to the
+  // title path, which is also what runs when the service is disabled or down.
   if (!credits) return resolveYoutubeFromTitle(url);
 
   return {
@@ -184,8 +196,9 @@ async function resolveYoutube(url) {
     songName: credits.songName,
     artists: credits.artists,
     filmOrAlbum: credits.filmOrAlbum,
-    // The description carries no reliable release date, and nothing here may invent one.
-    releaseYear: null,
+    // The InnerTube music header carries a publish date ("626M views - Nov 7, 2022"), which oEmbed
+    // never did - so a YouTube link can now fill ReleaseYear too.
+    releaseYear: credits.releaseYear,
     publisher: null,
     ...roleFields(credits),
     credits: credits.allCredits,
