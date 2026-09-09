@@ -491,6 +491,62 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
     non-decreasing regardless of which branch a user takes. Update this map if Studio changes the
     flow's questions or branches.
 
+## Resuming an abandoned registration
+
+The flow asks 30-odd questions plus several uploads, so leaving to find a PAN card is normal.
+`typebotSessionStore` is in-memory (no TTL, gone on restart) and Typebot drops its own session after
+~20 minutes idle, so a returning member used to land on question 1.
+
+`App_Accounts_ChatJournal` records **every answer Typebot accepted**, in order. On an empty start
+call with a journal present, `registrationEngine`'s `offerResume()` returns the synthetic
+`RESUME_CHOICE_INPUT` ("Continue where I left off" / "Start over"); `resumeFromJournal()` then opens
+a fresh chat and replays the answers into it until it is asking what it was asking when they left.
+
+### Why replay and not a cursor — verified live, don't re-litigate
+
+`startFrom: { type: 'group', groupId }` is **accepted but silently ignored** by
+`/api/v1/typebots/{publicId}/startChat` — the response is byte-identical to a normal start, at
+question 1. It works only on `/preview/startChat`, which serves the **draft** flow, so returning
+members would get whatever half-finished edit is open in Studio while everyone else gets the
+published one. (Measured once with the draft 3 days ahead of published.) Not acceptable here.
+
+Replay was measured to land on the identical block id, **file uploads included**: a presigned S3 URL
+minted for the old session is still accepted as an answer by a new one, even though it embeds the
+old result id.
+
+### Why the existing columns aren't enough
+
+**38 of the flow's 131 input blocks have no `variableId` at all** — pure navigation choices
+("(Individual) Author / Composer", "I Accept"). Their answers are stored nowhere, yet they decide
+which branch the member is on. The path cannot be reconstructed from `App_Accounts`.
+
+### Rules that keep it safe
+
+- **Journal what was SENT to Typebot, not what the member typed.** The gates (email OTP, work link,
+  OCR confirmation, payment review) transform answers before the relay; journaling the relayed
+  value is what makes replay side-effect-free — no OTP re-sent, no work link re-saved against the
+  5-link cap, no document re-read.
+- **Only journal accepted answers.** Typebot answers a rejected input with **200 and the same input
+  repeated**, so `response.input?.id !== answeredInput.id` is the acceptance test. Also skipped when
+  `sessionExpired`, where the answer was never delivered at all.
+- **`replayJournal()` never goes back through `handle()`** — it talks straight to `typebotClient`.
+  Every gate lives inside `handle()` and has already run for these answers.
+- **The block-id guard is the republish detector.** `response.input.id !== turn.blockId` stops the
+  replay rather than feeding a stored answer to a different question. A short replay then calls
+  `truncateAfterReplay()`, because turns past that point describe a path the member is no longer on
+  and the *next* resume would replay them faithfully into the wrong branch.
+- **Only an explicit "start over" clears a journal.** Anything else resumes — the destructive branch
+  must never be reachable by a stray tap.
+
+Block ids survive a republish (checked after the 2026-09-09 publish: 0 of `progressMap.js`'s 131
+ids lost, all gate ids and the 7 OCR button labels intact), so journals normally stay valid across
+Studio edits.
+
+Created by `scripts/add-chat-journal.sql`, **not `db push`** — see that script and
+`scripts/add-alias-table.sql` for why (`db push` doesn't know about the filtered unique indexes on
+`App_Accounts` and may drop them). Add the model to `schema.prisma` by hand, then `prisma generate`
+only.
+
 ## Music Credits Service (work links)
 
 `modules/work/services/musicCredits.service.js` calls the in-house credits service

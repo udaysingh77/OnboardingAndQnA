@@ -52,6 +52,7 @@ import {
   MAX_EMAIL_CHANGES,
 } from '../services/emailOtpGate.js';
 import { isAddressProofTypeStep, resolveAddressProofOcrType, isManualAddressAnswer } from '../services/typebot/addressProofTypeMap.js';
+import { conversationJournalService, REPLAY_STOP } from '../services/conversationJournal.service.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
 // in this order) - see "Document Verification API" for the real OCR
@@ -196,6 +197,46 @@ const OCR_CONFIRM_CHOICE_INPUT = {
 // needs no changes (same non-Typebot-block pattern as OCR_CONFIRM_CHOICE_INPUT).
 const EMAIL_OTP_INPUT = { id: 'email-otp-verification', type: 'text input', options: {} };
 
+// Offered to a member who left a registration unfinished and came back. Synthetic, same pattern as
+// the two above.
+const RESUME_CHOICE_INPUT = {
+  id: 'resume-registration',
+  type: 'choice input',
+  items: [
+    { id: 'resume-continue', content: 'Continue where I left off' },
+    { id: 'resume-restart', content: 'Start over' },
+  ],
+};
+
+// Deliberately only matches the destructive answer. The resume branch is the default, so a member
+// who taps something unexpected keeps their progress instead of silently losing it.
+function choosesRestart(message) {
+  return /^\s*(start over|start again|restart|start from the beginning)\s*$/i.test(String(message ?? ''));
+}
+
+// The flow asks 30-odd questions, so someone returning after a gap has usually done real work. Lead
+// with how far they got - it is the one thing that tells them the time was not wasted.
+function describeResumeOffer(percent) {
+  const sofar = Number.isInteger(percent) ? ` You'd completed about ${percent}% of it.` : '';
+  return `Welcome back! You have a registration already in progress.${sofar}\n\nWould you like to carry on from where you left off, or start over?`;
+}
+
+// Replay put the member back mid-flow, so the question they now see is not the one they remember
+// answering last - say why before Typebot's own message.
+//
+// Deliberately carries no percentage. The offer above quotes how far they GOT (the last block they
+// answered); by here the flow has moved on to the next question, which scores slightly higher - and
+// two different numbers a second apart reads as a bug. The live `progress` field still carries it.
+function describeResumed() {
+  return "Picking up where you left off. Here's the next question.";
+}
+
+// The published flow changed since they were last here, so their answers stop matching partway.
+// Everything already saved is untouched; they just re-answer from the point the flow diverged.
+function describeResumedPartially() {
+  return "We've restored as much of your earlier registration as we could. Some questions have changed since you were last here, so we'll need a few answers again from this point.";
+}
+
 // Hold the conversation on the work-link step and ask again. Typebot is never advanced, so the
 // member can retry as often as they need without burning one of their MAX_WORK_LINKS slots.
 function askForAnotherLink(existing, text) {
@@ -260,6 +301,81 @@ async function saveAndOfferAnother({ userId, existing, resolved, trust, note, me
   };
 }
 
+// Returns a reply offering to resume, or null when there is nothing to resume and the caller should
+// just start a normal chat. Never throws: if the journal can't be read, a first-question start is a
+// worse experience but still a working one.
+async function offerResume(userId) {
+  let turns = 0;
+  let lastBlock = null;
+  try {
+    turns = await conversationJournalService.countTurns(userId);
+    if (turns === 0) return null;
+    lastBlock = await conversationJournalService.lastBlockId(userId);
+  } catch (err) {
+    logger.warn({ userId, err }, 'Could not read the conversation journal - starting a fresh chat');
+    return null;
+  }
+
+  typebotSessionStore.set(userId, { pendingResumeChoice: true });
+
+  return {
+    sessionEnded: false,
+    messages: [textMessage('resume-offer', describeResumeOffer(resolveProgress(lastBlock)))],
+    input: RESUME_CHOICE_INPUT,
+    progress: resolveProgress(lastBlock),
+  };
+}
+
+// Opens a fresh chat on the published flow and feeds the member's own answers back into it until it
+// is asking what it was asking when they left. See conversationJournal.service.js for why this is a
+// replay rather than a jump, and why it must not go back through handle().
+async function resumeFromJournal({ userId, token }) {
+  const turns = await conversationJournalService.loadJournal(userId);
+  const startResponse = await typebotClient.startChat({
+    prefilledVariables: { token, registrationId: userId },
+  });
+
+  const { response, replayed, stop } = await conversationJournalService.replayJournal({
+    sessionId: startResponse.sessionId,
+    startResponse,
+    turns,
+  });
+
+  // A replay that stopped short leaves the rest of the journal describing a path the member is no
+  // longer on. Cut it back so what they answer from here appends cleanly.
+  if (stop !== REPLAY_STOP.COMPLETE && replayed < turns.length) {
+    await conversationJournalService.truncateAfterReplay(userId, replayed);
+  }
+
+  logger.info({ userId, replayed, total: turns.length, stop }, 'Resumed a registration from its journal');
+
+  // Replay ran the flow to its end - they had actually finished, so treat this exactly as the relay
+  // does when it runs out of questions.
+  if (!response.input) {
+    typebotSessionStore.clear(userId);
+    await conversationJournalService.clearJournal(userId);
+    try {
+      await registrationService.complete(userId, userId);
+    } catch (err) {
+      if (err.errorCode !== 'REGISTRATION_INCOMPLETE') {
+        logger.warn({ userId, err }, 'Failed to auto-complete registration while resuming');
+      }
+    }
+    return { sessionEnded: true, messages: response.messages ?? [], input: null, progress: 100 };
+  }
+
+  typebotSessionStore.set(userId, { sessionId: startResponse.sessionId, input: response.input });
+
+  const notice = stop === REPLAY_STOP.COMPLETE ? describeResumed() : describeResumedPartially();
+
+  return {
+    sessionEnded: false,
+    messages: [textMessage('resume-restored', notice), ...(response.messages ?? [])],
+    input: response.input,
+    progress: resolveProgress(response.input.id),
+  };
+}
+
 /**
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
@@ -282,6 +398,32 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     logger.warn({ userId }, 'Discarding stale conversation session on empty start call');
     typebotSessionStore.clear(userId);
     existing = null;
+  }
+
+  // Resolve a pending resume offer. Checked before every other gate because the member is answering
+  // "carry on or start over?", not any question in the flow.
+  if (existing?.pendingResumeChoice && message !== undefined) {
+    // Only an explicit "start over" throws the progress away. Anything else - a stray tap, a typo,
+    // a frontend that echoes something unexpected - resumes, because the destructive branch is the
+    // one that must never be reached by accident.
+    if (!choosesRestart(message)) {
+      return resumeFromJournal({ userId, token });
+    }
+
+    // The journal has to go with it, or the next empty start call offers to resume the registration
+    // they just chose to abandon.
+    await conversationJournalService.clearJournal(userId);
+    typebotSessionStore.clear(userId);
+    existing = null;
+    message = undefined;
+  }
+
+  // No live session and nothing pending: this is either a first-time member or one coming back to
+  // an unfinished registration. Offer the choice before starting a chat, so "start over" doesn't
+  // burn a Typebot session we'd immediately throw away.
+  if (!existing && message === undefined && (!attachedFileUrls || attachedFileUrls.length === 0)) {
+    const offer = await offerResume(userId);
+    if (offer) return offer;
   }
 
   // Resolve a pending OCR-confirmation before doing anything else - the
@@ -690,12 +832,34 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     }
   }
 
+  // Journal the answer so this registration can be resumed if the member walks away. Two things
+  // must be true first, and neither is obvious from the response alone:
+  //   - Typebot ACCEPTED it. A rejected answer comes back 200 with the SAME input repeated, so an
+  //     unchecked write would journal "Invalid message" turns and replay the member into a loop.
+  //   - the session didn't just expire. Then the answer was never delivered - `response` is a fresh
+  //     chat at question 1, which looks like acceptance but isn't.
+  // What goes in is `text`, i.e. what was RELAYED, not what the member typed: the gates above
+  // transform answers, and replaying the relayed value is what keeps a resume free of side effects.
+  if (answeredInput && !sessionExpired && response.input?.id !== answeredInput.id) {
+    await conversationJournalService.recordTurn({
+      userId,
+      blockId: answeredInput.id,
+      variableId: answeredInput.options?.variableId,
+      answer: text,
+      attachedFileUrls,
+    });
+  }
+
   // continueChat's response doesn't repeat sessionId - keep the one we already have.
   const sessionId = existing ? existing.sessionId : response.sessionId;
   const ended = !response.input;
 
   if (ended) {
     typebotSessionStore.clear(userId);
+    // Nothing left to resume to - the flow has no more questions. Held even when complete() below
+    // reports the registration still incomplete, since a journal can only restore a position and
+    // there is no position left.
+    await conversationJournalService.clearJournal(userId);
     // Mark the registration complete in-process now that the Typebot flow has
     // genuinely run out of questions - don't rely on a Studio HTTP block to do
     // this externally (same reasoning as handleUpload() saving documents
