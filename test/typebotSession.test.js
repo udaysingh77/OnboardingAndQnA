@@ -19,12 +19,13 @@
 // each file in its own process, so that stays contained here.
 // Run: npm test
 // ==================================================================
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { appError } from '../src/shared/errors.js';
 import { typebotClient, isDeadSessionError } from '../src/modules/conversation/services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../src/modules/conversation/services/typebot/typebotSessionStore.js';
 import { handle, handleUpload } from '../src/modules/conversation/engines/registrationEngine.js';
+import { prisma } from '../src/shared/prisma.js';
 
 // --- the real wire shapes --------------------------------------------------
 
@@ -76,6 +77,11 @@ test('unrelated failures are not dead sessions', () => {
 const USER = '999999';
 // A variableId no map knows, so no answer is persisted and the test needs no database.
 const LIVE_INPUT = { id: 'old-block', type: 'text input', options: { variableId: 'vunmappedxxxxxxxxxxxxxxxx' } };
+
+after(async () => {
+  await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: BigInt(USER) } }).catch(() => {});
+  await prisma.$disconnect().catch(() => {});
+});
 const FRESH_INPUT = { id: 'first-question', type: 'choice input', items: [{ id: 'i1', content: 'Yes' }] };
 
 let calls;
