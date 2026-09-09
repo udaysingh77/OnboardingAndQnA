@@ -21,6 +21,7 @@
 // Four blocks - one per role path. Two are labelled "payment", two "Pay".
 // ==================================================================
 import { env } from '../../../../config/env.js';
+import { renderSections } from '../../../registration/services/registrationReview.service.js';
 
 const PAYMENT_BLOCK_IDS = new Set([
   'mqd5zfukd99nkczylu206jo1', // Group #68, item "payment"
@@ -49,19 +50,11 @@ export function confirmsReview(message) {
   return ['yes, everything is correct', 'yes', 'y', 'correct', 'confirm'].includes(answer);
 }
 
-// A line with a label renders as "Label: value"; one without renders as a plain bullet, which is
-// what lists of documents and songs want - "PAN card: uploaded" reads worse than "- PAN card".
+// Rendering itself (a line with a label -> "Label: value", one without -> a plain bullet, which is
+// what lists of documents and songs want) lives in registrationReview.service.js's renderSections()
+// - the resume summary in registrationEngine.js wants the same body under a different intro line.
 export function describeReview(sections) {
-  const body = sections
-    .map(({ title, lines }) => {
-      const rendered = lines
-        .map(({ label, value }) => (label ? `  ${label}: ${value}` : `  - ${value}`))
-        .join('\n');
-      return `${title}\n${rendered}`;
-    })
-    .join('\n\n');
-
-  return `Please check your details before payment.\n\n${body}`;
+  return `Please check your details before payment.\n\n${renderSections(sections)}`;
 }
 
 // Typebot can't be driven backwards, so we don't pretend the member can edit here - we tell them

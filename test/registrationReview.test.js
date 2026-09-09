@@ -19,10 +19,24 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { prisma } from '../src/shared/prisma.js';
-import { registrationReviewService } from '../src/modules/registration/services/registrationReview.service.js';
+import { registrationReviewService, renderSections } from '../src/modules/registration/services/registrationReview.service.js';
 import { describeReview, describeCorrection, confirmsReview, PAYMENT_REVIEW_INPUT } from '../src/modules/conversation/services/typebot/paymentGate.js';
 
 // --- rendering (pure) ------------------------------------------------------
+
+test('renderSections is the shared body describeReview wraps - and anything else can reuse', () => {
+  // Pinned directly, not just through describeReview(), because registrationEngine.js's resume
+  // summary also calls this - a regression here would silently break both intros at once.
+  const sections = [
+    { title: 'Your details', lines: [{ label: 'Name', value: 'Arijit Singh' }] },
+    { title: 'Documents you uploaded (1)', lines: [{ label: null, value: 'PAN card' }] },
+  ];
+  const body = renderSections(sections);
+
+  assert.match(body, /Your details\n {2}Name: Arijit Singh/);
+  assert.match(body, /Documents you uploaded \(1\)\n {2}- PAN card/);
+  assert.equal(describeReview(sections), `Please check your details before payment.\n\n${body}`);
+});
 
 test('labelled lines render as "Label: value", unlabelled ones as bullets', () => {
   const text = describeReview([
