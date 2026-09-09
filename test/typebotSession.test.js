@@ -105,8 +105,12 @@ function stubClient({ continueChat }) {
 const texts = (res) =>
   (res.messages ?? []).map((m) => m.content?.richText?.[0]?.children?.[0]?.text ?? '').join(' || ');
 
-beforeEach(() => {
+beforeEach(async () => {
   typebotSessionStore.clear(USER);
+  // The engine journals every accepted answer, so the tests above leave turns behind for USER - and
+  // a journal makes an empty start call return the resume offer instead of starting a chat. Clear
+  // it so each test here starts from "no registration in progress", which is what they all assume.
+  await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: BigInt(USER) } }).catch(() => {});
 });
 
 test('an expired session restarts the chat instead of wedging', async () => {
@@ -198,4 +202,41 @@ test('an expired session during upload clears it and hands back a usable questio
   assert.match(texts(res), /timed out/i);
   assert.match(texts(res), /wasn't attached/i, 'the member is told the file did not go through');
   assert.equal(typebotSessionStore.get(USER).sessionId, 'fresh-session');
+});
+
+// --- a blank message is a start call, not an answer -------------------------
+
+test('an empty-string message is treated as a start call, not an answer', async () => {
+  // Apidog and any client that always sends the field post `{"message": ""}`. The validator allows
+  // it, and every "is this a start call?" test compares against undefined - so without normalising,
+  // a returning member was sent to question 1 instead of being offered their registration back.
+  // Found live against account 386, which had 15 journalled turns waiting.
+  stubClient({ continueChat: () => ({ input: LIVE_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '' });
+
+  assert.equal(calls.continueChat.length, 0, 'a blank message is never relayed as an answer');
+  assert.equal(calls.startChat.length, 1, 'it starts a chat, exactly as an omitted message does');
+});
+
+test('a whitespace-only message is blank too', async () => {
+  stubClient({ continueChat: () => ({ input: LIVE_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '   \n ' });
+
+  assert.equal(calls.continueChat.length, 0);
+});
+
+test('a blank message alongside a file still sends the file', async () => {
+  // `text = message ?? (...)` - `??` keeps an empty string, so an upload arriving with
+  // `message: ""` used to relay "" instead of the URL, and Typebot rejected its own upload.
+  stubClient({ continueChat: () => ({ input: FRESH_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '', attachedFileUrls: ['https://s3/x.jpeg'] });
+
+  assert.equal(calls.continueChat.length, 1, 'a file IS an answer, so it is relayed');
+  assert.equal(calls.continueChat[0].message.text, 'https://s3/x.jpeg', 'the URL, not an empty string');
 });

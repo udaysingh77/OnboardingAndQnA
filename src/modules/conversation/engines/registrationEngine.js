@@ -380,6 +380,14 @@ async function resumeFromJournal({ userId, token }) {
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
 export async function handle({ userId, token, message, attachedFileUrls }) {
+  // A blank message is not an answer to anything - Typebot rejects empty text on every input type,
+  // and the validator lets `message: ""` through, so a client that always sends the field (Apidog,
+  // a form that posts an empty box) would otherwise be treated as if it had said something. Every
+  // "is this a start call?" test below compares against undefined, so normalise here rather than
+  // widening each one - this is also what lets `text` fall through to attachedFileUrls further
+  // down, where `??` would keep an empty string and send that instead of the file.
+  if (typeof message === 'string' && !message.trim()) message = undefined;
+
   let existing = typebotSessionStore.get(userId);
   let bypassEmailGate = false;
   let bypassWorkLinkSave = false;
