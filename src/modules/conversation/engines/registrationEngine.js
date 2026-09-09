@@ -446,6 +446,18 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
     // The journal has to go with it, or the next empty start call offers to resume the registration
     // they just chose to abandon.
     await conversationJournalService.clearJournal(userId);
+
+    // Work links are append-only with a hard cap, so - unlike documents or account fields, which
+    // stay untouched here on purpose - a song added before this restart would otherwise still count
+    // against MAX_WORK_LINKS and reappear in the payment review / resume summary even though the
+    // member only added one link since choosing to start over. Never lets a delete failure block the
+    // restart itself.
+    try {
+      await workLinkService.clearWorkLinks(userId);
+    } catch (err) {
+      logger.warn({ userId, err }, 'Failed to clear work links on restart, continuing');
+    }
+
     typebotSessionStore.clear(userId);
     existing = null;
     message = undefined;

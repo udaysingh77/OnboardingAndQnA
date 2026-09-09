@@ -105,4 +105,15 @@ async function countWorkLinks(userId) {
   return workRepository.countByAccountId(userId);
 }
 
-export const workLinkService = { saveWorkLink, countWorkLinks, MAX_WORK_LINKS, MATCH_MARKERS };
+// Called when a member explicitly starts the conversation over. Work links are the one piece of
+// conversation-derived data this touches - unlike documents or account fields, they're an
+// append-only list with a hard cap (MAX_WORK_LINKS), so a restart that doesn't clear them makes
+// every song from a prior attempt count against that cap and reappear in later summaries, even
+// though the member only added one link "this time". Documents and account fields are deliberately
+// left alone - deleting an already-uploaded PAN card because someone tapped "Start over" would be
+// a far worse failure than a stale song count.
+async function clearWorkLinks(userId) {
+  return workRepository.deleteByAccountId(userId);
+}
+
+export const workLinkService = { saveWorkLink, countWorkLinks, clearWorkLinks, MAX_WORK_LINKS, MATCH_MARKERS };

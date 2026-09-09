@@ -351,3 +351,36 @@ test('missing optional metadata is stored as null, not an empty string', async (
   assert.equal(row.Publisher, null);
   assert.equal(row.DigitalLink, 'https://www.youtube.com/watch?v=abc123');
 });
+
+// --- clearing on "Start over" -----------------------------------------------
+
+test('clearWorkLinks removes every song for that member', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(1), matched: true });
+  await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(2), matched: true });
+  assert.equal(await workLinkService.countWorkLinks(userId), 2);
+
+  await workLinkService.clearWorkLinks(userId);
+
+  assert.equal(await workLinkService.countWorkLinks(userId), 0);
+  // Not just uncounted - actually gone, so a fresh link after this starts a clean cap.
+  const row = await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(3), matched: true });
+  assert.ok(row, 'the cap was not left exhausted by the cleared rows');
+  assert.equal(await workLinkService.countWorkLinks(userId), 1, 'only the new link counts');
+});
+
+test('clearWorkLinks never touches another member', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userA = await makeAccount();
+  const userB = await makeAccount();
+
+  await workLinkService.saveWorkLink({ userId: userA, resolved: spotifyTrack(1), matched: true });
+  await workLinkService.saveWorkLink({ userId: userB, resolved: spotifyTrack(2), matched: true });
+
+  await workLinkService.clearWorkLinks(userA);
+
+  assert.equal(await workLinkService.countWorkLinks(userA), 0);
+  assert.equal(await workLinkService.countWorkLinks(userB), 1, "someone else's restart must not touch this");
+});

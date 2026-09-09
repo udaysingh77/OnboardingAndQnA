@@ -27,6 +27,7 @@ import { conversationJournalRepository } from '../src/modules/conversation/repos
 import { handle } from '../src/modules/conversation/engines/registrationEngine.js';
 import { typebotSessionStore } from '../src/modules/conversation/services/typebot/typebotSessionStore.js';
 import { registrationReviewService } from '../src/modules/registration/services/registrationReview.service.js';
+import { workLinkService } from '../src/modules/work/services/workLink.service.js';
 
 // --- replay (pure, typebotClient stubbed) ----------------------------------
 
@@ -176,6 +177,7 @@ before(async () => {
 after(async () => {
   for (const id of createdAccountIds) {
     await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: id } }).catch(() => {});
+    await prisma.appAccountsWorkRegistration.deleteMany({ where: { AccountId: id } }).catch(() => {});
     await prisma.appAccounts.delete({ where: { AccountId: id } }).catch(() => {});
   }
   await prisma.$disconnect().catch(() => {});
@@ -409,4 +411,62 @@ test('a summary that fails to build never blocks the resume itself', async (t) =
   // like every other "must never block the member" path in this engine.
   assert.equal(resumed.input?.id, 'b2');
   assert.match(texts(resumed), /Picking up where you left off/);
+});
+
+// --- "Start over" also clears previously saved work links -------------------
+//
+// Work links are append-only with a hard cap (MAX_WORK_LINKS in workLink.service.js), unlike
+// documents or account fields. A tester found that restarting and adding just one new song still
+// counted "2 of 5 links" and showed the old song too - because the original "Start over" only
+// cleared the journal and the Typebot session, never App_Accounts_WorkRegistration. See
+// registrationEngine.js's choosesRestart branch.
+
+test('"Start over" clears previously saved work links, not just the journal', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  await workLinkService.saveWorkLink({
+    userId,
+    resolved: { provider: 'spotify', url: 'https://open.spotify.com/track/old', songName: 'Old Song', artists: ['Someone'], credits: ['Someone'] },
+    matched: true,
+  });
+  assert.equal(await workLinkService.countWorkLinks(userId), 1, 'sanity: the old song is there before restarting');
+
+  await conversationJournalService.recordTurn({ userId, blockId: 'b1', answer: 'x' });
+
+  const realStart = typebotClient.startChat;
+  t.after(() => { typebotClient.startChat = realStart; });
+  typebotClient.startChat = async () => ({ sessionId: 'fresh-session', messages: [], input: { id: 'q1' } });
+
+  await handle({ userId, token: 't' }); // the resume offer
+  const restarted = await handle({ userId, token: 't', message: 'Start over' });
+
+  assert.equal(restarted.input?.id, 'q1', 'a genuinely fresh chat, not the resume offer again');
+  assert.equal(await workLinkService.countWorkLinks(userId), 0, 'the old song must not survive a restart');
+  assert.equal(await conversationJournalService.countTurns(userId), 0);
+});
+
+test('"Start over" does not touch another member\'s work links', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const restarting = await makeAccount();
+  const untouched = await makeAccount();
+
+  for (const userId of [restarting, untouched]) {
+    await workLinkService.saveWorkLink({
+      userId,
+      resolved: { provider: 'spotify', url: `https://open.spotify.com/track/${userId}`, songName: 'Song', artists: ['A'], credits: ['A'] },
+      matched: true,
+    });
+  }
+  await conversationJournalService.recordTurn({ userId: restarting, blockId: 'b1', answer: 'x' });
+
+  const realStart = typebotClient.startChat;
+  t.after(() => { typebotClient.startChat = realStart; });
+  typebotClient.startChat = async () => ({ sessionId: 'fresh-session', messages: [], input: { id: 'q1' } });
+
+  await handle({ userId: restarting, token: 't' });
+  await handle({ userId: restarting, token: 't', message: 'Start over' });
+
+  assert.equal(await workLinkService.countWorkLinks(restarting), 0);
+  assert.equal(await workLinkService.countWorkLinks(untouched), 1, "a different member's song must survive");
 });
