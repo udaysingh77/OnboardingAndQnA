@@ -40,6 +40,7 @@ npm test                 # node:test against "test/**/*.test.js"
 npm run prisma:migrate   # prisma migrate dev
 npm run prisma:generate  # prisma generate
 npm run prisma:studio    # prisma studio
+npm run build:progress-map  # regenerate progressMap.js from the live Typebot flow
 npm run setup:db         # enable SQL Server TCP/SQL auth, create Dreamsoft_UAT + iprs_app login, write DATABASE_URL to .env
 ```
 
@@ -146,7 +147,7 @@ Always call `.parse` (not `.safeParse`); a thrown `ZodError` is caught by `async
 
 - `config/env.js` reads `.env` and validates via Zod, failing fast on boot. **Adding an env var means updating three places: `.env`, `.env.example`, and `envSchema` in `config/env.js`.**
 - Key vars: `PORT`, `DATABASE_URL`, `JWT_SECRET` (≥16 chars), `JWT_EXPIRES_IN`, `JWT_ISSUER`, `CORS_ORIGIN`, `OTP_PROVIDER` (`mock`|`sms`), `OTP_TTL_SECONDS`, `OTP_MOCK_VALUE` (dev-only fixed OTP), `MSG91_AUT_KEY`, `MSG91_TEMP_ID`, `MSG91_OTP_LENGTH`, `MSG91_OTP_EXPIRY`, plus global/auth rate-limit values.
-- OCR: `OCR_PROVIDER` (`http`|`stub`), `OCR_API_BASE_URL`, `OCR_REQUEST_TIMEOUT_MS`.
+- OCR: `OCR_PROVIDER` (`http`|`stub`), `OCR_API_BASE_URL`, `OCR_REQUEST_TIMEOUT_MS`, `OCR_ENABLED` (blanket kill-switch for OCR across every doc type, default `true` — see AGENTS.md).
 - Typebot: `TYPEBOT_API_BASE_URL`, `TYPEBOT_ID`, `TYPEBOT_PREVIEW_MODE` (test an unpublished bot via its internal id — see AGENTS.md), `TYPEBOT_API_TOKEN` (optional), `TYPEBOT_REQUEST_TIMEOUT_MS`, `MAX_UPLOAD_SIZE_MB`.
 - Never commit real `.env` (git-ignored); keep `.env.example` in sync with any new key.
 
