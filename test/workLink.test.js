@@ -11,11 +11,14 @@
 //
 // Author_Composer and Author_Lyricist are now filled - but only from the
 // credits service's role-labelled output (Spotify's own contributor
-// roles, or the credit block in a YouTube description). When it has
-// nothing, they stay null exactly as before; the old Spotify artist bag
-// and YouTube title never fill them, because neither says who wrote the
-// song. LanguageNames, WorkCategory and DocLink stay null always -
-// nothing we can call sources them truthfully.
+// roles, or the credit block in a YouTube description), AND only when
+// the confirming member's own on-file name is itself inside that role's
+// list (`memberNames`) - a role-labelled list describes the SONG, not
+// whichever member happens to be confirming it. When either condition
+// fails, the columns stay null exactly as before; the old Spotify artist
+// bag and YouTube title never fill them either, because neither says who
+// wrote the song. LanguageNames, WorkCategory and DocLink stay null
+// always - nothing we can call sources them truthfully.
 // Run: npm test
 // ==================================================================
 import { test, before, after } from 'node:test';
@@ -170,7 +173,7 @@ test('a link with no role-labelled credits leaves the writer columns null', asyn
   assert.equal(row.DocLink, null);
 });
 
-test('role-labelled credits are written to the writer columns', async (t) => {
+test('role-labelled credits are written to the writer columns when the member IS that writer', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
   const userId = await makeAccount();
 
@@ -183,15 +186,58 @@ test('role-labelled credits are written to the writer columns', async (t) => {
       lyricists: ['Amitabh Bhattacharya', 'Amitabh Bhattacharya', 'Priya Saraiya'],
     },
     matched: true,
+    // The member's own on-file name is itself in the composers list - that is what earns the write.
+    memberNames: ['Sachin-Jigar'],
   });
 
   assert.equal(row.Author_Composer, 'Sachin-Jigar');
-  assert.equal(row.Author_Lyricist, 'Amitabh Bhattacharya, Priya Saraiya');
+  // The member matched as composer, not lyricist - but the full lyricist credit still gets written,
+  // because the column records the song's own lyricist(s), not only names the member matched under.
+  assert.equal(row.Author_Lyricist, null, "matching as composer doesn't also unlock the lyricist column");
 
   // Never sourced, so never written - the rule that survives this change.
   assert.equal(row.LanguageNames, null);
   assert.equal(row.WorkCategory, null);
   assert.equal(row.DocLink, null);
+});
+
+test('a credited member who is NOT the composer/lyricist never gets a stranger\'s name in their row', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  // The member matched the song overall (matched: true - e.g. as a backing vocalist somewhere in
+  // the credits), but their own name is not Sachin-Jigar or Amitabh Bhattacharya. Writing the full
+  // composer/lyricist list into THEIR row would put someone else's name in a legally meaningful
+  // column - see workLink.service.js.
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: {
+      ...spotifyTrack(),
+      composers: ['Sachin-Jigar'],
+      lyricists: ['Amitabh Bhattacharya'],
+    },
+    matched: true,
+    memberNames: ['Rana Mazumdar'],
+  });
+
+  assert.equal(row.Author_Composer, null);
+  assert.equal(row.Author_Lyricist, null);
+});
+
+test('a dropped middle name still earns the writer column, via the same rules as song matching', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: { ...spotifyTrack(), composers: ['A.R. Rahman'], lyricists: [] },
+    matched: true,
+    // "Allah Rakha Rahman" (the identity-document name) vs the credit's "A.R. Rahman" - the exact
+    // initial/dropped-middle-name case workMatch.service.js exists to forgive.
+    memberNames: ['Allah Rakha Rahman'],
+  });
+
+  assert.equal(row.Author_Composer, 'A.R. Rahman');
 });
 
 test('an empty credit list is stored as null, not an empty string', async (t) => {
@@ -220,6 +266,8 @@ test('a crowded writer credit is clipped to the column width', async (t) => {
       lyricists: Array.from({ length: 40 }, (_, i) => `Lyricist Number ${i}`),
     },
     matched: true,
+    // The member has to be one of the credited writers for either column to be written at all.
+    memberNames: ['Composer Number 0', 'Lyricist Number 0'],
   });
 
   assert.ok(row.Author_Composer.length <= 100, `Author_Composer ${row.Author_Composer.length}`);

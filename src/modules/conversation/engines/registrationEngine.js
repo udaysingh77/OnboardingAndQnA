@@ -213,12 +213,18 @@ function askForAnotherLink(existing, text) {
 // the member on the way past. The notice matters: at the cap this used to return nothing at all, so
 // the fifth link saved silently and a sixth was discarded silently, both while the other four each
 // got a "Saved - that's N of 5" line. Confirming a song and being told nothing reads as a bug.
-async function saveAndOfferAnother({ userId, existing, resolved, trust, note }) {
+async function saveAndOfferAnother({ userId, existing, resolved, trust, note, memberNames = [] }) {
   let count = null;
   let stored = null;
   try {
     // Only a name that was on file beforehand counts as verified - see workMatch.service.js.
-    stored = await workLinkService.saveWorkLink({ userId, resolved, matched: trust === MATCH_TRUST.TRUSTED });
+    // memberNames decides whether Author_Composer/Author_Lyricist get filled - see workLink.service.js.
+    stored = await workLinkService.saveWorkLink({
+      userId,
+      resolved,
+      matched: trust === MATCH_TRUST.TRUSTED,
+      memberNames,
+    });
     count = await workLinkService.countWorkLinks(userId);
   } catch (err) {
     // A storage failure must not strand the member on this step - log it and let the conversation
@@ -437,7 +443,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       };
     }
 
-    const outcome = await saveAndOfferAnother({ userId, existing, resolved, trust });
+    const outcome = await saveAndOfferAnother({ userId, existing, resolved, trust, memberNames: [...trusted, ...claimed] });
     if (!outcome.advance) return outcome;
     // At the cap: replay the url as the answer to the real Typebot step so the conversation
     // advances exactly as it would have without the loop, with the save bypassed. The notice
@@ -498,6 +504,7 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       note: matched
         ? "Thanks - we've saved this song, and we'll remember that name for your next one."
         : "We've saved this song. Our team will verify your credit on it.",
+      memberNames: names,
     });
     if (!outcome.advance) return outcome;
     workLinkNotice = outcome.notice;
