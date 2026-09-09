@@ -37,7 +37,7 @@ import {
   describeCorrection,
   PAYMENT_REVIEW_INPUT,
 } from '../services/typebot/paymentGate.js';
-import { registrationReviewService } from '../../registration/services/registrationReview.service.js';
+import { registrationReviewService, renderSections } from '../../registration/services/registrationReview.service.js';
 import { resolveProgress } from '../services/typebot/progressMap.js';
 import {
   isEmailStep,
@@ -237,6 +237,14 @@ function describeResumedPartially() {
   return "We've restored as much of your earlier registration as we could. Some questions have changed since you were last here, so we'll need a few answers again from this point.";
 }
 
+// What buildReview() found on file, worded for a member picking a conversation back up rather than
+// about to pay. Only named/mapped fields - the same ones the payment review shows - not raw journal
+// turns like "I Accept". `sections` is already empty-filtered by buildReview(), so nothing here
+// decides what to include.
+function describeResumeSummary(sections) {
+  return `Here's what you told us earlier:\n\n${renderSections(sections)}`;
+}
+
 // Hold the conversation on the work-link step and ask again. Typebot is never advanced, so the
 // member can retry as often as they need without burning one of their MAX_WORK_LINKS slots.
 function askForAnotherLink(existing, text) {
@@ -368,9 +376,26 @@ async function resumeFromJournal({ userId, token }) {
 
   const notice = stop === REPLAY_STOP.COMPLETE ? describeResumed() : describeResumedPartially();
 
+  // Reminds the member what they already told us, before the "picking up" notice. Read straight
+  // from the database, not the journal: those fields were persisted the first time the member
+  // answered them, and replay above never re-writes them, so this is already correct without
+  // re-deriving anything from the journal's raw turns. A summary must never block the resume
+  // itself - buildReview() failing is a lesser problem than the member being stuck.
+  let summaryMessage = null;
+  try {
+    const sections = await registrationReviewService.buildReview(userId);
+    if (sections.length) summaryMessage = textMessage('resume-summary', describeResumeSummary(sections));
+  } catch (err) {
+    logger.warn({ userId, err }, 'Could not build the resume summary, continuing without it');
+  }
+
   return {
     sessionEnded: false,
-    messages: [textMessage('resume-restored', notice), ...(response.messages ?? [])],
+    messages: [
+      ...(summaryMessage ? [summaryMessage] : []),
+      textMessage('resume-restored', notice),
+      ...(response.messages ?? []),
+    ],
     input: response.input,
     progress: resolveProgress(response.input.id),
   };
