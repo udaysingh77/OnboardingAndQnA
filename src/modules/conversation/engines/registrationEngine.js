@@ -477,8 +477,18 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
   if (existing?.pendingDocConfirmation && message !== undefined) {
     const { fileUrl } = existing.pendingDocConfirmation;
 
+    // typebotSessionStore.set() replaces the whole session object, so addressProofOcrType has to be
+    // carried forward explicitly here - otherwise a reupload silently loses it and the second OCR
+    // attempt falls back to the generic doc type, which isn't an OCR type, so extraction is skipped.
+    const carriedAddressProofOcrType =
+      existing.addressProofOcrType !== undefined ? { addressProofOcrType: existing.addressProofOcrType } : {};
+
     if (!isAffirmative(message)) {
-      typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        ...carriedAddressProofOcrType,
+      });
       return {
         sessionEnded: false,
         messages: [textMessage('ocr-confirmation-rejected', 'No problem - please upload the document again.')],
@@ -489,7 +499,11 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
 
     // Confirmed: replay this exactly as handleUpload() would have advanced
     // the conversation before this confirmation step existed.
-    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    typebotSessionStore.set(userId, {
+      sessionId: existing.sessionId,
+      input: existing.input,
+      ...carriedAddressProofOcrType,
+    });
     existing = typebotSessionStore.get(userId);
     message = undefined;
     attachedFileUrls = [fileUrl];
@@ -1034,9 +1048,9 @@ export async function handleUpload({ userId, token, file }) {
   const docType = resolveDocumentType(variableId);
   // Address-proof uploads (permanent/current) don't carry their own document type - it was
   // recorded a turn earlier from the paired type-choice question (see addressProofTypeMap.js /
-  // registrationEngine.handle()). null means an unsupported type (Passport/Electricity Bill/
-  // Letter from Property Owner) or none recorded - saveDocument() falls back to docType itself,
-  // which isn't in OCR_DOC_TYPES, so OCR is correctly skipped.
+  // registrationEngine.handle()). null means an unsupported type (Passport/Letter from Property
+  // Owner) or none recorded - saveDocument() falls back to docType itself, which isn't in
+  // OCR_DOC_TYPES, so OCR is correctly skipped.
   const isAddressProofUpload = ADDRESS_PROOF_UPLOAD_TYPES.has(docType);
   const ocrDocType = isAddressProofUpload ? session.addressProofOcrType : undefined;
   if (isAddressProofUpload && ocrDocType == null) {
@@ -1062,10 +1076,14 @@ export async function handleUpload({ userId, token, file }) {
     const labelDocType = ocrDocType ?? OCR_TYPE_BY_DOC_TYPE[docType] ?? docType;
 
     if (result.extracted) {
+      // Carry addressProofOcrType forward too - a "No, re-upload" answer resets the session back
+      // to this same shape (see handle()'s pendingDocConfirmation branch), and without this the
+      // second upload attempt loses its OCR type and silently skips extraction.
       typebotSessionStore.set(userId, {
         sessionId: session.sessionId,
         input: session.input,
         pendingDocConfirmation: { fileUrl },
+        ...(session.addressProofOcrType !== undefined ? { addressProofOcrType: session.addressProofOcrType } : {}),
       });
 
       return {
