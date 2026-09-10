@@ -159,6 +159,29 @@ model AppAccountsAlias {
   @@map("App_Accounts_Alias")
 }
 
+/// Every answer Typebot ACCEPTED, in order, so an abandoned registration can be resumed instead of
+/// restarted. Created by scripts/add-chat-journal.sql, not `db push` - see that script for why the
+/// position cannot be restored any other way (Typebot's `startFrom` is silently ignored on the
+/// public endpoint, and 38 of the flow's 131 inputs have no variableId, so the branch a member took
+/// is not recoverable from App_Accounts columns).
+///
+/// `Answer` holds what was sent to TYPEBOT, not what the member typed - the gates transform answers
+/// before the relay, and journaling the relayed value is what keeps replay free of side effects.
+model AppAccountsChatJournal {
+  JournalId    BigInt   @id(map: "PK_App_Accounts_ChatJournal") @default(autoincrement())
+  AccountId    BigInt
+  TurnIndex    Int
+  BlockId      String   @db.NVarChar(50)
+  VariableId   String?  @db.NVarChar(50)
+  Answer       String?  @db.NVarChar(Max)
+  AttachedUrls String?  @db.NVarChar(Max)
+  CreateDate   DateTime @default(now(), map: "DF_App_Accounts_ChatJournal_CreateDate") @db.DateTime
+
+  @@unique([AccountId, TurnIndex], map: "UQ_App_Accounts_ChatJournal_AccountId_TurnIndex")
+  @@index([AccountId], map: "IX_App_Accounts_ChatJournal_AccountId")
+  @@map("App_Accounts_ChatJournal")
+}
+
 model AppAccountsDoc {
   AccountDocId     BigInt    @id(map: "PK_App_Accounts_Doc") @default(autoincrement())
   AccountId        BigInt?

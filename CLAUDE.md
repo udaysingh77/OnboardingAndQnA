@@ -76,7 +76,7 @@ src/
 │  ├─ auth/         services/otp/{interface,factory,mock,msg91} + tokenBlacklist.js
 │  ├─ user/         controllers/services/repositories/validators
 │  ├─ registration/ controllers/services/repositories/validators + services/ocr/{interface,factory,http,stub}
-│  ├─ conversation/ services/{conversation.router,typebot/*} + engines/{aiEngine,registrationEngine}.js
+│  ├─ conversation/ services/{conversation.router,conversationJournal,typebot/*} + engines/{aiEngine,registrationEngine}.js + repositories/
 │  ├─ work/         services/{workLinkResolver,musicCredits,youtube,gemini,workLink,workMatch}.service.js
 │  └─ health/
 ├─ app.js           middleware + route assembly (order: security → parsing → logging → routes → 404 → errors)
