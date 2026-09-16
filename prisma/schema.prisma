@@ -494,3 +494,29 @@ model MemberRoleTypeLookUpFees {
   @@map("MemberRoleType_LookUp_Fees")
   @@ignore
 }
+
+/// Transaction records for onboarding membership fee payments via PayU.
+/// Created by scripts/add-payment-table.sql and hand-added here rather than via `db push`.
+model AppAccountsPayment {
+  PaymentId     BigInt   @id(map: "PK_App_Accounts_Payment") @default(autoincrement())
+  AccountId     BigInt
+  TxnId         String   @unique(map: "UQ_App_Accounts_Payment_TxnId") @db.NVarChar(100)
+  MihPayId      String?  @db.NVarChar(100)
+  Amount        Float
+  Currency      String   @default("INR", map: "DF_App_Accounts_Payment_Currency") @db.NVarChar(10)
+  Status        String   @default("PENDING", map: "DF_App_Accounts_Payment_Status") @db.NVarChar(50)
+  PaymentMode   String?  @db.NVarChar(50)
+  BankRefNo     String?  @db.NVarChar(100)
+  ProductInfo   String?  @db.NVarChar(255)
+  CustomerName  String?  @db.NVarChar(100)
+  CustomerEmail String?  @db.NVarChar(100)
+  CustomerPhone String?  @db.NVarChar(50)
+  PayuResponse  String?  @db.NVarChar(Max)
+  ErrorMessage  String?  @db.NVarChar(500)
+  CreateDate    DateTime @default(now(), map: "DF_App_Accounts_Payment_CreateDate") @db.DateTime
+  ModifedDate   DateTime @default(now(), map: "DF_App_Accounts_Payment_ModifedDate") @db.DateTime
+
+  @@index([AccountId], map: "IX_App_Accounts_Payment_AccountId")
+  @@map("App_Accounts_Payment")
+}
+

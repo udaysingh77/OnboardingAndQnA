@@ -4,35 +4,31 @@
 //
 // TWO THINGS ARE DIFFERENT HERE, both easy to trip over later:
 //
-// 1. This gate keys off the **block id**, not a variableId. Every other
-//    gate in this module (workLinkGate, emailOtpGate, conversationFieldMap,
-//    documentTypeMap) recognises its step by `options.variableId` - but
-//    the payment blocks are single-item choice inputs with no variable
-//    attached, so there is nothing else to match on. If the flow is
-//    re-published and these ids change, this gate goes silently
-//    unreachable, the same failure mode as the old `spotifyUrl` id.
-//    Re-fetch them from the builder API (see AGENTS.md).
+// 1. This gate keys off the **block id**, not a variableId - see
+//    paymentBlockIds.js, which owns the four ids and explains why. They
+//    live in their own module so the progress-map build script can check
+//    them without importing this file's env/Prisma dependencies.
 //
 // 2. It intercepts Typebot's **reply**, not the member's answer. Every
 //    other gate inspects the message coming in; this one inspects the
 //    input going back out, because the trigger is "Typebot just offered
 //    the payment button".
 //
-// Four blocks - one per role path. Two are labelled "payment", two "Pay".
+// 3. A payment block is a TERMINAL state: once the member is parked on one,
+//    handle() never relays their next message to Typebot. Every one of these
+//    four blocks leads to a single "Thank you for your payment." text and
+//    then the flow ends, so relaying anything at all made Typebot congratulate
+//    a member who had not paid (and ended the session, wiping their journal).
+//    Real payment runs entirely outside Typebot, through /payment/initiate and
+//    the PayU callback, so that closing message is now dead - the frontend's
+//    own success page is the closure.
+//
+// Four blocks - one per role path.
 // ==================================================================
 import { env } from '../../../../config/env.js';
 import { renderSections } from '../../../registration/services/registrationReview.service.js';
 
-const PAYMENT_BLOCK_IDS = new Set([
-  'mqd5zfukd99nkczylu206jo1', // Group #68, item "payment"
-  'o6vjstq2do6uuy67wfbzg451', // Group #68, item "payment"
-  'tjbgzghma2th8et9srotmzt5', // Group #147, item "Pay"
-  'ufpca0wnuwznk2ks7qbv39py', // Group #147, item "Pay"
-]);
-
-export function isPaymentStep(blockId) {
-  return PAYMENT_BLOCK_IDS.has(blockId);
-}
+export { isPaymentStep, PAYMENT_BLOCK_IDS } from './paymentBlockIds.js';
 
 // Synthetic block - not a Typebot block, Studio needs no changes (same pattern as
 // WORK_LINK_CONFIRM_INPUT and the OCR/email steps).
@@ -66,4 +62,22 @@ export function describeCorrection(registrationId) {
     : "Our team will get in touch with you to correct it.";
 
   return `${where}\n\nQuote your registration number: ${registrationId}\n\nYou can continue to payment in the meantime.`;
+}
+
+// Shown when the member types something while parked on the payment button instead of going
+// through checkout - the old behaviour was to hand that text to Typebot, which happily read it as
+// "Pay Application Fee" and thanked them for a payment that never happened.
+export function describePaymentPending() {
+  return "We haven't received your payment yet. Please tap the payment button above to complete it - your details are saved, so nothing is lost.";
+}
+
+// Payment is in, but complete() is still refusing - the member only ever reaches this if something
+// required is missing, since a completed registration routes them to the Q&A engine instead.
+export function describePaymentReceived(registrationId) {
+  const contact = env.SUPPORT_CONTACT?.trim();
+  const where = contact
+    ? `Please write to ${contact} and we'll finish it for you.`
+    : 'Our team will get in touch with you to finish it.';
+
+  return `We've received your payment - thank you. Your registration still needs a final check before it can be activated.\n\n${where}\n\nQuote your registration number: ${registrationId}`;
 }

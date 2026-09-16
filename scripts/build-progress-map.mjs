@@ -17,6 +17,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from '../src/config/env.js';
+import {
+  isPaymentStep,
+  PAYMENT_BLOCK_IDS,
+} from '../src/modules/conversation/services/typebot/paymentBlockIds.js';
 
 const BUILDER_BASE = 'https://bot.builder.choira.io';
 const OUTPUT = path.join(
@@ -221,9 +225,18 @@ function assertSane(flow, graph, { reachable, percent }) {
   }
   if (backwards) fail(`progress moves backwards on ${backwards} edge(s) - the map would be wrong`);
 
-  const payments = allInputs.filter((b) => (b.items ?? []).some((i) => /^pay(ment)?$/i.test(String(i.content ?? ''))));
+  // Matched against paymentGate.js's own block ids, not the button's label. This used to test the
+  // label with /^pay(ment)?$/i, which stopped matching the moment it was renamed to "Pay Application
+  // Fee" - the check then silently reported zero payment blocks instead of verifying anything.
+  const payments = allInputs.filter((b) => isPaymentStep(b.id));
   const unresolved = payments.filter((b) => !percent.has(b.id));
-  if (payments.length === 0) console.warn('  warning: no payment block found in the flow');
+  if (payments.length !== PAYMENT_BLOCK_IDS.size) {
+    fail(
+      `expected ${PAYMENT_BLOCK_IDS.size} payment blocks in the flow, found ${payments.length} - ` +
+        'a republish has changed their block ids, so paymentGate.js is now unreachable. ' +
+        'Re-fetch the ids and update src/modules/conversation/services/typebot/paymentBlockIds.js.',
+    );
+  }
   if (unresolved.length) fail(`${unresolved.length} payment block(s) did not resolve to a percentage`);
 
   return { inputs: allInputs.length, payments: payments.length };

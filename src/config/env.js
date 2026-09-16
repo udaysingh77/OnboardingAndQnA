@@ -1,4 +1,4 @@
-﻿// ==================================================================
+// ==================================================================
 // IPRS Platform Backend - Week 1 (Onboarding & Platform Foundation)
 // Environment configuration loader (validated with Zod)
 // ==================================================================
@@ -102,6 +102,25 @@ const envSchema = z.object({
   TYPEBOT_API_TOKEN: z.string().optional(),
   TYPEBOT_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().int().positive().default(10),
+
+  /* PayU Payment Gateway */
+  PAYU_KEY: z.string().optional().default('test_key'),
+  PAYU_SALT: z.string().optional().default('test_salt'),
+  PAYU_BASE_URL: z.string().default('https://test.payu.in'),
+  PAYU_WEBSERVICE_URL: z.string().default('https://test.payu.in/merchant/postservice.php?form=2'),
+  // No PAYU_DEFAULT_AMOUNT: the fee is never configurable or client-supplied. It is resolved
+  // server-side from the member's own role answer (RollTypeIds) via payu/feeSchedule.js, and
+  // initiatePayment() refuses to start a payment it cannot price rather than falling back.
+  // Where PayU itself POSTs the payment result back to (surl/furl sent in the initiate request) -
+  // must be OUR OWN publicly reachable /payment/callback endpoint, not a page PayU or the frontend
+  // owns. Optional so an unconfigured deploy falls back to PAYU_SUCCESS_URL/FAILURE_URL below
+  // (payment.service.js's old behaviour) rather than failing outright.
+  PAYU_CALLBACK_URL: z.string().optional(),
+  // Where the member's BROWSER ends up after our /payment/callback has processed PayU's postback -
+  // a frontend page, not PayU's own. payment.controller.js redirects here with ?txnid&status.
+  PAYU_SUCCESS_URL: z.string().optional(),
+  PAYU_FAILURE_URL: z.string().optional(),
+  PAYU_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
 });
 
 const parsed = envSchema.safeParse(process.env);

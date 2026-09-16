@@ -1,4 +1,4 @@
-﻿
+
 // ==================================================================
 // Express application assembly.
 // Middleware order matters: security -> parsing -> logging -> routes -> 404 -> errors.
@@ -15,6 +15,7 @@ import registrationRoutes from './modules/registration/routes/registration.route
 import conversationRoutes from './modules/conversation/routes/conversation.routes.js';
 import healthRoutes from './modules/health/routes/health.routes.js';
 import spotifyRoutes from './modules/spotify/routes/spotify.routes.js';
+import paymentRoutes from './modules/payment/routes/payment.routes.js';
 
 export const app = express();
 
@@ -39,6 +40,8 @@ app.use('/auth', authRoutes);
 app.use('/registration', registrationRoutes);
 app.use('/conversation', conversationRoutes);
 app.use('/spotify', spotifyRoutes);
+app.use('/payment', paymentRoutes);
+
 
 // --- 404 + central error handling (LAST) ---
 app.use(notFoundHandler);

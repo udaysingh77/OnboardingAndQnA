@@ -7,12 +7,15 @@ Guidance for AI coding agents working in this repository.
 IPRS Platform Backend for an AI-powered onboarding & Q&A chatbot platform (musicians joining IPRS).
 
 **Implemented**: auth (OTP/JWT), user + registration modules, document upload with real OCR
-(`ocr.choira.io`) for PAN/Aadhaar/bank, and a backend-driven Typebot relay (`conversation` module)
-that drives the onboarding conversation via Typebot's Chat API.
+(`ocr.choira.io`) for PAN/Aadhaar/bank, a backend-driven Typebot relay (`conversation` module)
+that drives the onboarding conversation via Typebot's Chat API, work-link collection with
+role-labelled credits (Spotify/YouTube) verified against the member's own name, a pre-payment
+review, and resuming an abandoned registration from a persisted journal.
 
-**Still out of scope / later milestones**: the AI Q&A chatbot itself (RAG/vector DB/tool calling —
+**Still out of scope / later milestones**: actual payment processing (only the review screen before
+the payment button exists), the AI Q&A chatbot itself (RAG/vector DB/tool calling —
 `aiEngine.js` is still a stub, only reachable once `ApplicationStatus === 1`), WhatsApp channel
-integration, staff dashboard, payments, escalation. Don't implement these without being asked.
+integration, staff dashboard, escalation. Don't implement these without being asked.
 
 ## Stack
 
@@ -35,7 +38,10 @@ npm run prisma:migrate   # prisma migrate dev
 npm run prisma:generate  # prisma generate
 npm run prisma:studio    # prisma studio
 npm run setup:db         # enable SQL Server TCP/SQL auth, create Dreamsoft_UAT + iprs_app login, write DATABASE_URL to .env
+npm run build:progress-map # regenerate progressMap.js from the live published Typebot flow - run after EVERY Studio republish
 ```
+
+Run a single test file directly with `node --test test/workMatch.test.js` (etc.).
 
 - Always run `npm test` (and `node --check` on any file you touch) before finishing.
 - No linter/formatter/typecheck is configured — don't hunt for ESLint/Prettier. `node --check` + `npm test` are the only verification.
@@ -66,14 +72,21 @@ src/
 │  ├─ auth/         services/otp/{interface,factory,mock,msg91} + tokenBlacklist.js
 │  ├─ user/         repository only - service/controller/routes/validators removed, unused
 │  │                (auth.service.js imports user.repository.js directly at login)
-│  ├─ registration/  controllers/services/repositories/validators
-│  ├─ conversation/ services/{conversation.router,typebot/*} + engines/{aiEngine,registrationEngine}.js
+│  ├─ registration/  controllers/services/repositories/validators + services/{ocr/*,registrationReview.service.js}
+│  ├─ conversation/ services/{conversation.router,conversationJournal.service.js,emailOtpGate.js,
+│  │                typebot/typebotClient,typebotSessionStore,progressMap,documentTypeMap,
+│  │                addressProofTypeMap,conversationFieldMap,workLinkGate,paymentGate}.js
+│  │                + repositories/{conversationJournal.repository.js}
+│  │                + engines/{aiEngine,registrationEngine}.js
+│  ├─ work/         services/{workLinkResolver,musicCredits,youtube,gemini,workLink,workMatch}.service.js
+│  │                + repositories/work.repository.js
+│  ├─ spotify/      standalone POST /spotify/metadata (services/{spotify,spotify.claim}) - legacy, see below
 │  └─ health/
-├─ app.js           middleware + route assembly
+├─ app.js           middleware + route assembly (mounts /health, /auth, /registration, /conversation, /spotify)
 └─ server.js        DB connectivity check (fail-fast) + bootstrap + graceful shutdown
-prisma/             schema.prisma (no migrations/ folder - schema comes from the SQL dump)
-scripts/            setup-db.ps1
-test/               smoke.test.js
+prisma/             schema.prisma (no migrations/ folder - schema comes from the SQL dump + db push)
+scripts/            setup-db.ps1, mra_cleaned.sql, build-progress-map.mjs, add-*.sql (schema-gap scripts - run by hand, NOT db push)
+test/               node:test suites - pure-logic tests plus DB-dependent ones that auto-skip
 ```
 
 Each module is self-contained (its own routes/controllers/services/repositories/validators). Extend by adding modules rather than growing cross-module dependencies.
@@ -140,9 +153,15 @@ Schemas are objects shaped `{ body?, query?, params? }`. Always call `.parse`; Z
 - Key vars: `PORT`, `DATABASE_URL`, `JWT_SECRET` (≥16 chars), `JWT_EXPIRES_IN`, `JWT_ISSUER`, `CORS_ORIGIN`,
   `OTP_PROVIDER` (mock|sms), `OTP_TTL_SECONDS`, `OTP_MOCK_VALUE` (dev-only fixed OTP),
   `MSG91_AUT_KEY`, `MSG91_TEMP_ID`, `MSG91_OTP_LENGTH`, `MSG91_OTP_EXPIRY`, plus global/auth rate-limit values.
-- OCR: `OCR_PROVIDER` (http|stub), `OCR_API_BASE_URL`, `OCR_REQUEST_TIMEOUT_MS`.
+- OCR: `OCR_PROVIDER` (http|stub), `OCR_API_BASE_URL`, `OCR_REQUEST_TIMEOUT_MS`, `OCR_ENABLED` (blanket kill-switch,
+  default true - flip to false when ocr.choira.io is flaky so chat-flow testing can pass uploads).
 - Typebot: `TYPEBOT_API_BASE_URL`, `TYPEBOT_ID`, `TYPEBOT_PREVIEW_MODE`, `TYPEBOT_API_TOKEN` (optional),
   `TYPEBOT_REQUEST_TIMEOUT_MS`, `MAX_UPLOAD_SIZE_MB` (multer limit on `POST /conversation/upload`).
+- Email/OTP: `EMAIL_OTP_LENGTH/EXPIRY_MINUTES/MAX_ATTEMPTS/RESEND_COOLDOWN_SECONDS`, `SMTP_HOST/PORT/SECURE/USER/PASSWORD`
+  (see "Email OTP Verification"), `SUPPORT_CONTACT` (quoted to the member at the payment review when they report an error).
+- Work links / credits: `MUSIC_CREDITS_API_BASE_URL` (default `https://spotify.choira.in`), `MUSIC_CREDITS_ENABLED`
+  (kill-switch), `MUSIC_CREDITS_REQUEST_TIMEOUT_MS`, `YOUTUBE_REQUEST_TIMEOUT_MS`, `GEMINI_API_KEY/MODEL/REQUEST_TIMEOUT_MS`
+  (see "Music Credits Service"); optional `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` (see "Spotify metadata").
 - Never commit real `.env` (it's git-ignored); keep `.env.example` in sync.
 
 ## Prisma
@@ -200,7 +219,8 @@ to check `completed: true/false`.
 
 - `POST /registration/:registrationId/documents/:documentType` — body `{ documentUrl }` (S3 URL
   from Typebot's own upload). `documentType` is a Zod enum: `PAN`, `AADHAAR`, `BANK`, `NOC`,
-  `COMPANY_DOC`, `PROFILE_PHOTO` (a single generalized route, not one per type — reuses
+  `COMPANY_DOC`, `PROFILE_PHOTO`, `PERMANENT_ADDRESS_PROOF`, `CURRENT_ADDRESS_PROOF`,
+  `DRIVING_LICENCE`, `VOTER_ID` (a single generalized route, not one per type — reuses
   `saveDocument`/`upsertDocument` unchanged for every type, to avoid duplicating the same logic
   across N routes). Upserts an `App_Accounts_Doc` row keyed by `(AccountId, DocumentCaption)`
   (manual find-then-update-or-create — no unique constraint exists to use Prisma's native
@@ -208,12 +228,18 @@ to check `completed: true/false`.
   **`DocumentLookupId` is intentionally left `null`** — `Doc_LookUp` has zero seed rows in the
   current DB/dump, so there's nothing valid to reference; wire it up once that lookup table is
   populated.
-- `POST /registration/:registrationId/complete` — requires `AccountEmail` set + the
-  3 *required* documents uploaded (`PAN`, `AADHAAR`, `BANK` — see `REQUIRED_DOC_TYPES` in
-  `registration.service.js`; `NOC`/`COMPANY_DOC`/`PROFILE_PHOTO` are conditional/optional in the
-  Typebot flow and don't gate completion), else 400 `REGISTRATION_INCOMPLETE` with a
-  `details.missing` list. Otherwise reuses the existing `markCompleted`/`toPublic`
-  (`ApplicationStatus = 1`) already used by `GET /status`.
+- `POST /registration/:registrationId/complete` — requires `AccountEmail` set + one document from
+  each of the 3 `REQUIRED_DOC_GROUPS` in `registration.service.js`: identity
+  (`PAN`/`COMPANY_PAN`/`PASSPORT`/`TIN` — an NRI often has no Indian PAN, observed live),
+  `BANK`, and address-proof (`PERMANENT_ADDRESS_PROOF`/`REGISTERED_ADDRESS_PROOF`). **There is no
+  `REQUIRED_DOC_TYPES` array anymore** — it was replaced by groups because each role path collects
+  the same real-world requirement under a different doc type (an individual uploads PAN +
+  PERMANENT_ADDRESS_PROOF; a company COMPANY_PAN + REGISTERED_ADDRESS_PROOF), and requiring the
+  individual names outright made completion impossible on the three company/NRI paths. `AADHAAR` is
+  deliberately not in any group — the live flow never asks for it. On missing items, `complete()`
+  throws 400 `REGISTRATION_INCOMPLETE` with a `details.missing` list of group labels. Otherwise it
+  reuses `markCompleted`/`toPublic` (`ApplicationStatus = 1`) already used by `GET /status`, and
+  also defaults an empty `TeritoryAppFor` to `'WORLD'` (idempotent, only fires while empty).
 
 **Fields intentionally not persisted**: the actual Typebot flow also asks about role
 (lyricist/composer), membership in another society, tax residency, and a Spotify link. None of
@@ -222,15 +248,22 @@ are shared production data (`Dreamsoft_UAT`) whose usage elsewhere is unverified
 a mapping for these. These answers live only in Typebot's own result store, not in this DB, until a
 real column/mapping is confirmed.
 
-**GST number, stage name/alias, email, place of birth, role (lyricist/composer/both), and territory
-applied for (INDIA/WORLD)** *are* persisted (via `conversationFieldMap.js` +
-`registrationService.saveConversationField()`, see "Conversation Router" below) — `GSTNo` (new
-column, added the same way `PANNo` was) and the existing
-`AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor` columns. Territory
-initially had no `options.variableId` set in Studio at all (Typebot only branched on it, never
-stored it to a variable) — the user assigned it a variable and republished, confirmed live via the
-builder API (`variableId = vufrpq6qr5rpcbewbffajjb73`), then it was wired the same way as every
-other `conversationFieldMap.js` entry.
+**GST number, stage name/alias, email, place of birth, role (lyricist/composer/both), territory
+applied for (INDIA/WORLD)**, plus a wide set of NRI and Owner/Publisher fields, *are* persisted
+(via `conversationFieldMap.js` + `registrationService.saveConversationField()`, see "Conversation
+Router" below) — `GSTNo` (new column, added the same way `PANNo` was), `Detail1` (duplicate GST
+write), and the existing `AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor`
+columns, plus `Nationality`/`DualNationality`/`AssociationName_India`/`ChanlDesc`/`KindAttention1`/
+`EntityType` and the `AccountAddress`/`AccountAddress_PR` manual "type your address" entries on the
+NRI/company paths. Territory initially had no `options.variableId` set in Studio at all (Typebot
+only branched on it, never stored it to a variable) — the user assigned it a variable and
+republished, confirmed live via the builder API (`variableId = vufrpq6qr5rpcbewbffajjb73` in the
+old individual-only bot; the new four-path bot's territory variable is `vn91tusicqaolw34d4zq2id33`),
+then it was wired the same way as every other `conversationFieldMap.js` entry. `EntityType`
+(Owner/Publisher fork: "Corporate (Pvt Ltd/Ltd Company)"/"Partnership"/"sole proprietry consern")
+stores the raw answer — `EntityType` had to be widened from `NVarChar(10)` to `NVarChar(50)` for
+it. `DualNationality` is special-cased in `saveConversationField()` (Yes/No → 1/0, the column is an
+Int); `AccountEmail` is always stored lowercased so the unique index can't be bypassed by case.
 
 **Bug found and fixed**: `PlaceOfBirth`'s key was `vfvvwcz6g7ueiw2lhqnwvg9z` — which turned out to
 be the **block id** of the "Please enter your place of birth" text-input block, not its
@@ -256,11 +289,13 @@ top-level "(Individual) Author/Composer" vs the other 3 dead-end role choices (o
 ever completes registration, so there's no real variance to persist); both consent gates
 (fraud-caution + data-consent — only one `Consent`/`ConsentDate` column pair exists for two
 distinct consents); `SocietyId` (BigInt FK, semantically wrong for the "member of another society?"
-yes/no answer); Spotify URL (no real matching column); OCR `name`/`fatherOrHusbandName` (real
-overwrite/semantic risk - `name` could clobber `AccountName` with OCR-formatted text, and
-`fatherOrHusbandName` can legitimately be a husband's name for married women voters, not a father's);
-bank OCR's `city`/`state`, EPIC number, driving-licence number, passport number (no matching column
-exists at all for any of these).
+yes/no answer); Spotify URL (no real matching column); OCR `fatherOrHusbandName` (can legitimately
+be a husband's name for married women voters, not a father's — and there's no matching column for
+it anyway); bank OCR's `city`/`state`, EPIC number, driving-licence number, passport number (no
+matching column exists at all for any of these). Note that OCR `name` **is** now persisted — but
+only from identity documents (PAN/AADHAAR/PASSPORT, see `IDENTITY_OCR_DOC_TYPES`), and only while
+`AccountName` is still empty — the earlier blanket "never persist OCR name" rule was relaxed for
+that one evidence-backed case, keeping the clobber guard the rest of the field still has.
 
 **Address-proof OCR's extracted `address`** (from Driving Licence/Voter ID/Electricity Bill - the 3
 address-proof types with an `address` field, see `OCR_FIELD_LABELS`) is now persisted too, unlike
@@ -280,10 +315,11 @@ the first time `ApplicationStatus` flips to 1 — a marker for other `Dreamsoft_
 this registration came through the Choira onboarding flow. `Detail3`–`Detail9`, `Detail11`,
 `Detail12` remain unmapped/unused.
 
-**Auth model**: Typebot runs the existing `/auth/send-otp` + `/auth/verify-otp` first (no new
-token mechanism), stores `token` + `registrationId` as variables, and sends
-`Authorization: Bearer <token>` on every registration call — reusing `authenticate` unchanged.
-Every new service function additionally calls `assertOwnRegistration(userId, registrationId)`
+**Auth model**: the frontend runs the existing `/auth/send-otp` + `/auth/verify-otp` first (no new
+token mechanism) and then calls the conversation endpoints with `Authorization: Bearer <token>` —
+reusing `authenticate` unchanged. `registrationEngine.startChat` feeds `token` + `registrationId`
+in as Typebot `prefilledVariables`, which is how the relay knows whose registration it is.
+Every service function additionally calls `assertOwnRegistration(userId, registrationId)`
 (in `registration.service.js`), which 403s if the path param doesn't match `req.user.id` — the id
 alone is never sufficient to touch another user's registration.
 
@@ -355,10 +391,14 @@ What gets persisted to `AppAccounts` from a successful OCR result, and what does
 The document upload response includes `verified` (boolean) and `extracted` (raw OCR data) when
 OCR was attempted for that doc type; both are absent for NOC/COMPANY_DOC/PROFILE_PHOTO.
 
-Schema note: `PANNo` and `GSTNo` are the only changes to `prisma/schema.prisma` since the initial
-`db pull` import, both applied via `npx prisma db push` (not `migrate dev` — the `iprs_app` DB user
-lacks the `CREATE DATABASE` permission `migrate dev`'s shadow database needs), so there is still no
-`prisma/migrations/` folder; the live schema and `schema.prisma` are kept in sync directly.
+Schema note: since the initial `db pull` import the schema has gained `PANNo` and `GSTNo` (applied
+via `npx prisma db push`, not `migrate dev` — the `iprs_app` DB user lacks the `CREATE DATABASE`
+permission `migrate dev`'s shadow database needs), `EntityType` was widened `NVarChar(10)`→`NVarChar(50)`,
+and three tables were added: `Email_Verification_Otp` (db push) and `App_Accounts_ChatJournal` +
+`App_Accounts_Alias` (created by `scripts/add-chat-journal.sql`/`add-alias-table.sql`, model added
+to `schema.prisma` by hand — see "Resuming an abandoned registration"). There is still no
+`prisma/migrations/` folder; the live schema and `schema.prisma` are kept in sync by whichever of
+those two paths a change needs.
 
 ## Conversation Router
 
@@ -376,9 +416,8 @@ live published flow has no HTTP Request blocks (verified via the builder API), s
 `registrationEngine.handle()` calls `registrationService.complete()` itself when the Typebot
 session ends (`sessionEnded: true`). Because the flow never asks for first/last name, DOB, or
 gender, and its `address` variable is unused, `complete()`'s basic-details gate only requires
-`AccountEmail` (the one field the flow does collect, via `conversationFieldMap.js`) plus
-`PAN`/`BANK`/`PERMANENT_ADDRESS_PROOF` (`REQUIRED_DOC_TYPES` — `PERMANENT_ADDRESS_PROOF` replaced
-`AADHAAR` here, since the live flow no longer collects Aadhaar specifically) — see
+`AccountEmail` (the one field the flow does collect, via `conversationFieldMap.js`) plus one
+document from each `REQUIRED_DOC_GROUPS` group (see "Typebot Registration Flow" above) — see
 `registration.service.js`'s `complete()`.
 
 - `modules/conversation/services/typebot/typebotClient.js` — `startChat`, `continueChat`,
@@ -389,20 +428,29 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
   plan needed — per Typebot's own docs, answers aren't saved and some of Typebot's own blocks like
   "Send email" are skipped) instead of `.../typebots/{publicId}/startChat`; flip to `false` and
   update `TYPEBOT_ID` to the real `publicId` once the bot is published. The app must still boot
-  fine with `TYPEBOT_ID` unset either way. Current bot: `publicId = uday-updated-typebot-flow-42ihn4e`
-  (published, `TYPEBOT_PREVIEW_MODE=false`) — replaced the earlier `udaytypebot-fjy7b2y` bot when the
-  Studio flow was rebuilt. Only the **"(Individual) Author / Composer"** role path is complete in
-  this flow — the other 3 role choices ((NRI) Author/Composer, Owner/Publisher, (NRI)
-  Owner/Publisher) dead-end into informational text with zero further edges (no file-input block,
-  no continuation) and are explicitly future work; `progressMap.js` only covers the one live path.
+  fine with `TYPEBOT_ID` unset either way. Current bot: `publicId = all-flow-finished-p4opm8e`
+  (published, `TYPEBOT_PREVIEW_MODE=false`) — this is the four-path flow (Individual **and** NRI
+  Author/Composer, Owner/Publisher, NRI Owner/Publisher), all of them reaching a working upload +
+  payment step now; full per-path processor coverage sits in `documentTypeMap.js` /
+  `conversationFieldMap.js` / `addressProofTypeMap.js`. `progressMap.js` is generated from this
+  flow by `npm run build:progress-map` and no longer covers "one live path".
 - `modules/conversation/services/typebot/typebotSessionStore.js` — in-memory
-  `Map<userId, { sessionId, input }>`, mirrors `modules/auth/services/tokenBlacklist.js` (swap for
-  Redis behind the same interface in a later milestone).
+  `Map<userId, session>` where `session` is `{ sessionId, input }` plus the gate/turn state fields
+  below (`pendingDocConfirmation`, `pendingEmailVerification`, `pendingWorkLinkConfirm`,
+  `pendingWorkLinkAlias`, `pendingWorkLinkChoice`, `pendingPaymentReview`, `pendingResumeChoice`,
+  `addressProofOcrType`, `emailChanges`). Mirrors `modules/auth/services/tokenBlacklist.js` (swap
+  for Redis behind the same interface in a later milestone).
 - `modules/conversation/services/typebot/documentTypeMap.js` — maps a file-input block's
   `variableId` to one of our document types (`PAN`/`BANK`/`PROFILE_PHOTO`/`NOC`/
-  `PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF`). Update this whenever a file-input block's
-  variable is added/renamed in the Typebot flow. `COMPANY_DOC` has no entry yet — that branch has
-  no working file-input block in Studio (dead-end, future work).
+  `PERMANENT_ADDRESS_PROOF`/`CURRENT_ADDRESS_PROOF`, plus the NRI/company path uploads:
+  `TRC`/`SS_NUMBER`/`FORM_41`/`TIN`/`SELF_DECLARATION`/`PASSPORT`/`COMPANY_PHOTO`/`PEC`/
+  `ENTITY_INCORPORATION`/`COMPANY_TRC`/`LETTER`/`REGISTERED_ADDRESS_PROOF`/`COMM_ADDRESS_PROOF`/
+  `COMM_ADDRESS_PROOF_2`/`COMPANY_PAN`/`GST_CERTIFICATE`/`MOA_AOA`/`BOARD_RESOLUTION`/`COMPANY_NOC`/
+  `PARTNERSHIP_DEED`/`AUTHORITY_LETTER`/`TUM`). Update this whenever a file-input block's
+  variable is added/renamed in the Typebot flow. `COMPANY_DOC` has no entry yet — the company
+  branch uses `COMPANY_PAN`/`GST_CERTIFICATE`/etc. instead of a generic company-document slot.
+  Note the REST document route's Zod enum only accepts a subset of these; the chat path saves the
+  full set in-process via this map.
 - `modules/conversation/services/typebot/addressProofTypeMap.js` — the live flow replaced the old
   dedicated Aadhaar upload with a generalized "address proof" flow, asked twice (permanent, then
   current-only-if-different): the user picks a document type from a choice input (Passport /
@@ -443,26 +491,34 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
   these on the next live report before re-investigating from scratch.
 - `modules/conversation/services/typebot/conversationFieldMap.js` — same pattern as
   `documentTypeMap.js` but for plain text/choice answers: maps a block's `variableId` to an
-  `AppAccounts` column. Currently maps GST no, alias/stage name, and email — confirmed live and
-  verified end-to-end via `sqlcmd` (alias/email; GST's `variableId` was filled in after its Studio
-  block got a variable assigned, not yet re-verified against the DB). Persisted via
+  `AppAccounts` column. Today it maps GST no, alias/stage name, email, place of birth,
+  role/`RollTypeIds`, territory, nationality, association name, dual nationality, the manual
+  "type your address" answers, `ChanlDesc`/`KindAttention1`/`EntityType` (Owner/Publisher path) and
+  the company trade name (reuses `AccountAlias`). Persisted via
   `registrationService.saveConversationField()`, which whitelists the field name against a
   hardcoded `CONVERSATION_FIELDS` list rather than trusting the map blindly.
 - `modules/conversation/engines/registrationEngine.js`:
   - `handle({ userId, token, message, attachedFileUrls })` — no existing session → `startChat`
     with `prefilledVariables: { token, registrationId: userId }`; existing session →
-    `continueChat`. Before overwriting the session, it checks whether the *previous* turn's input
-    (`existing.input`, i.e. the question `message` is answering) maps to a known field via
-    `conversationFieldMap.js`, and persists it if so — a failure here is logged and swallowed, it
-    never breaks the conversation relay itself. Response shape stays close to Typebot's own
-    (`messages`/`input`/`progress`) — no invented transformation, since the frontend's exact
-    expectations weren't specified.
+    `continueChat`. **A blank `message` is treated as a start call, not an answer** (Typebot
+    rejects empty text on every input type, and the validator lets `""` through), which also
+    discards a stale stored session. Before overwriting the session, it checks whether the
+    *previous* turn's input (`existing.input`, i.e. the question `message` is answering) maps to a
+    known field via `conversationFieldMap.js`, and persists it if so — a failure here is logged
+    and swallowed, it never breaks the conversation relay itself. **An expired Typebot session
+    (404 from `continueChat`, see `typebotClient.isDeadSessionError`) is recovered by restarting
+    the chat automatically** — one restart only, with a message telling the member nothing was
+    lost. Response shape stays close to Typebot's own (`messages`/`input`/`progress`) — no
+    invented transformation, since the frontend's exact expectations weren't specified.
   - `handleUpload({ userId, token, file })` — gets a presigned URL from Typebot for the *current*
     file-input step, uploads the buffer, and — this is the key simplification versus the original
     wiring guide — **saves the document itself** by calling the existing
     `registrationService.saveDocument()` directly (same OCR + `PANNo`/bank-column persistence
     built for the Studio-HTTP-block model, just invoked from here instead). Because of this,
-    Typebot's Studio no longer needs its own HTTP Request blocks for documents at all.
+    Typebot's Studio no longer needs its own HTTP Request blocks for documents at all. File names
+    are sanitised first (`safeFileName`) — Typebot drops the raw name into the presigned URL and
+    rejects URLs with spaces/`#`/`?` on the next answer, so "Copy of Choira PAN.jpeg" must become
+    "pan.jpeg".
   - `POST /conversation/upload` is `multipart/form-data` (via `multer`, memory storage, limited by
     `MAX_UPLOAD_SIZE_MB`) — the only multipart endpoint in this app; everything else is JSON.
   - **OCR-confirmation gate**: for OCR-eligible doc types (PAN/AADHAAR/BANK, and address-proof
@@ -483,13 +539,22 @@ gender, and its `address` variable is unused, `complete()`'s basic-details gate 
     `startChat`/`continueChat` — Studio's Theme "Enable progress bar" toggle only affects Typebot's
     own embed widget, not the API), so it's self-computed by
     `modules/conversation/services/typebot/progressMap.js`. The published flow is a branching graph
-    (individual vs company/publisher, GST yes/no, alias yes/no, "member of another society"
-    yes/no), not linear, so `progressMap.js` hardcodes `stepsUntilDone` per input-block id — traced
-    from the flow's actual `groups`/`edges` (fetched via the builder API,
-    `bot.builder.choira.io/api/v1/typebots/{id}/publishedTypebot`) as 1 + the worst-case (max) of
-    each block's successor blocks' `stepsUntilDone`, so the resulting percent is guaranteed
-    non-decreasing regardless of which branch a user takes. Update this map if Studio changes the
-    flow's questions or branches.
+    (four role paths plus GST/alias/other-society forks), not linear, so
+    `progressMap.js` is **generated** — `npm run build:progress-map` re-derives "questions answered
+    on this path" per input-block id from the live published flow's `groups`/`edges` (builder API,
+    `bot.builder.choira.io/api/v1/typebots/{id}/publishedTypebot`), sorted by percent, and fails
+    loudly if progress would move backwards on any edge or a payment block is unresolvable. **Run
+    it after every Studio republish** — the map went stale once in production precisely because no
+    one regenerated it. Nothing in the map reaches 100 on purpose; `handle()` forces 100 when the
+    session actually ends. The script needs `TYPEBOT_ID` and `TYPEBOT_API_TOKEN` (the builder
+    token) from `.env`.
+  - **More gates in `handle()`**, all synthetic-block driven (Studio needs no changes), checked
+    before the normal relay: the work-link loop (`workLinkGate.js`, see "Work links in the
+    conversation flow") and the pre-payment review (`paymentGate.js`, "Payment review" below). The
+    payment gate is the odd one out — it keys off the **block id** (`PAYMENT_BLOCK_IDS`), not a
+    `variableId`, because the payment blocks are single-item choice inputs with no variable
+    attached; if a republish changes those ids the gate goes silently unreachable, so re-verify
+    them via the builder API.
 
 ## Resuming an abandoned registration
 
@@ -534,13 +599,21 @@ which branch the member is on. The path cannot be reconstructed from `App_Accoun
 - **The block-id guard is the republish detector.** `response.input.id !== turn.blockId` stops the
   replay rather than feeding a stored answer to a different question. A short replay then calls
   `truncateAfterReplay()`, because turns past that point describe a path the member is no longer on
-  and the *next* resume would replay them faithfully into the wrong branch.
+  and the *next* resume would replay them faithfully into the wrong branch. (The journal also stores
+  `variableId` per turn — diagnostic only; replay matches on the block id.)
 - **Only an explicit "start over" clears a journal.** Anything else resumes — the destructive branch
-  must never be reachable by a stray tap.
+  must never be reachable by a stray tap. A "start over" also calls `workLinkService.clearWorkLinks()`
+  — work links are append-only with a hard cap, so keeping them would let a restarted member hit the
+  5-link ceiling with one song. Documents and account fields are deliberately NOT cleared on restart.
+- **The resume answer tells them what's already on file.** `resumeFromJournal()` prepends a summary
+  (from `registrationReviewService.buildReview()`) and "We've restored as much of your earlier
+  registration as we could" when the flow diverged — build failures are logged and skipped, never
+  allowed to block the resume.
 
 Block ids survive a republish (checked after the 2026-09-09 publish: 0 of `progressMap.js`'s 131
 ids lost, all gate ids and the 7 OCR button labels intact), so journals normally stay valid across
-Studio edits.
+Studio edits — and `progressMap.js` is regenerable via `build:progress-map` if a future publish
+ever does move ids.
 
 Created by `scripts/add-chat-journal.sql`, **not `db push`** — see that script and
 `scripts/add-alias-table.sql` for why (`db push` doesn't know about the filtered unique indexes on
@@ -623,38 +696,98 @@ kill-switch, same shape as `OCR_ENABLED`.
 > reaches the confirmation card. Configure `GEMINI_API_KEY` if this matters; there is no
 > deterministic substitute, for the "Chaleya" reason above.
 
+## Work links in the conversation flow
+
+The live flow asks for *one* song link and moves on; **everything else** — identifying the provider,
+showing the song back, extracting a credited name when the match fails, looping up to the cap — is
+backend-driven with synthetic blocks from `services/typebot/workLinkGate.js`, Studio needs no
+changes. All four role paths share one `workUrl` variable (`WORK_URL_VARIABLE_ID`; all gates match
+their step by `options.variableId`, the one exception being the payment gate below, which keys off
+a block id).
+
+- `registrationEngine.handle()` intercepts the link answer *before* relaying to Typebot:
+  `workLinkResolver.service.js` turns the URL into a provider-agnostic `resolved` shape
+  (`{ provider, url, songName, artists, filmOrAlbum, releaseYear, publishers, composers, lyricists,
+  credits, isMusicVideo }`), then a synthetic confirm card shows the song. Unresolvable/not-a-song
+  links re-ask the step; nothing is written until the member confirms the song.
+- On confirm, `matchCredits()` (`workMatch.service.js`) checks the song's **`credits`** (every
+  platform-reported name) against the member's names, split by evidentiary weight:
+  **trusted** = `AccountName` + `AccountAlias` (both on file before the member saw the credit list),
+  **claimed** = aliases the member typed at the work-link step *after* seeing the list. A trusted
+  match stores the link `verified`; a claimed match stores it unverified — being on the alias table
+  never promotes a name to trusted. If nothing matches, a synthetic `WORK_LINK_ALIAS_INPUT` asks
+  "what name are you credited under?"; `parseAliasList()` splits comma-separated names, they're
+  saved to `App_Accounts_Alias` (source `work-link`) so the next link matches without asking again,
+  and after `MAX_ALIAS_ATTEMPTS` (2) the song is saved unverified rather than wedging the member —
+  staff find these rows via `CreatedBy`.
+- Saving is `workLinkService.saveWorkLink()` (one `App_Accounts_WorkRegistration` row), hard-capped
+  at `MAX_WORK_LINKS = 5` **in the service**, not just the gate — the cap still bites if a restarted
+  conversation re-asks the step. `CreatedBy` is `'chat:name-matched'` or `'chat:name-unverified'`.
+  `Author_Composer`/`Author_Lyricist` are filled **only when the member's own on-file name is itself
+  inside that specific role's credit list** (`writerCredit()` reuses `matchCredits`'s comparison) —
+  role-labelled credits describe the *song*, not the member, and a stranger's name must never land in
+  a writer column (see the "grounded data only" note above).
+- Name comparison is token-based (first and last tokens must correspond; initial-for-full-name and a
+  one-letter typo are accepted; a single-token mononym credit may match the member's first *or* last
+  token, but a single-token *member* name must equal the whole credit) — see `workMatch.service.js`,
+  pinned by `test/workMatch.test.js`.
+- After each save a synthetic "add another?" input loops the step; at the cap the last URL is replayed
+  as the answer to Typebot's own question so the conversation advances normally.
+
+## Payment review
+
+`paymentGate.js` intercepts Typebot's **reply**, not the member's answer: when the relay's response
+`input` is one of the payment blocks (`PAYMENT_BLOCK_IDS`, keyed by **block id** because the payment
+buttons are single-item choice inputs with no variable attached — re-verify these via the builder API
+if a republish changes them), `handle()` swaps in the synthetic `PAYMENT_REVIEW_INPUT` and shows
+everything on file first, built by `registrationReviewService.buildReview()` straight from the
+database (fields, uploaded documents, claimed songs, aliases) — not from Typebot variables, so an
+OCR misread that never made it into the DB shows up as missing rather than passing silently. "Yes,
+everything is correct" returns the real payment block; "No" answers with `SUPPORT_CONTACT` + the
+registration id (Typebot can't be driven backwards, so the payment button is still offered). A failed
+`buildReview()` never blocks the button.
+
+**A payment block is a terminal state — Typebot is never driven past one.** All four blocks lead to a
+single "Thank you for your payment." text (Group #144) and then the flow ends, so that message is now
+dead code: real payment happens entirely outside Typebot, via `POST /payment/initiate` and PayU's
+callback, and the frontend's own success page is the closure. Three rules enforce this:
+
+- `handle()` never relays a message that arrives while the member is parked on a payment block. It
+  answers with `describePaymentPending()` (or `describePaymentReceived()` if a SUCCESS payment exists
+  but `complete()` is still refusing) and re-offers the same button. Before this, relaying handed
+  Typebot the button's own answer — so anyone who typed into the chat, or posted `{"message": "Pay"}`
+  by hand, got congratulated on a payment that never happened, the session ended, and
+  `clearJournal()` wiped their resume data.
+- `initiatePayment()` throws 409 `PAYMENT_ALREADY_COMPLETED` when the account already has a SUCCESS
+  payment, so a stale chat tab or a back button can't mint a second live PayU checkout. Only SUCCESS
+  blocks — a PENDING row is what an abandoned PayU page leaves behind and those members must be able
+  to retry.
+- On a successful callback, `handlePayuCallback()` clears the Typebot session and the journal — but
+  **only once `complete()` has actually succeeded**. If it threw (a document still missing), both are
+  left intact so the member can still resume, and the failure is logged at `warn`: money has changed
+  hands and they are not registered.
+
 ## Spotify Credit Verification
 
 `POST /spotify/metadata` (`modules/spotify/`, behind `authenticate`) — given `{ url, actualName,
 stageName }`, fetches the track's metadata from the real Spotify Web API (client-credentials OAuth,
 token cached in-memory) and checks whether `actualName` or `stageName` matches one of the track's
-credited artists (diacritics/punctuation/case-insensitive match via `normalizeName()`). Every call
-also writes an `App_Accounts_WorkRegistration` row (song/album/artists/release-year) regardless of
-match outcome — this is an existing table from the original DB dump, not a new one.
+credited artists (diacritics/punctuation/case-insensitive match via `normalizeName()`). An
+`App_Accounts_WorkRegistration` row (song/album/artists/release-year) is written **only when the
+claim actually matched** — an earlier version wrote one for every call, which put songs that weren't
+the caller's into the rights register while the response said `status: false`.
 `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET` are optional in `envSchema` (feature no-ops with a clear
 `SPOTIFY_CREDENTIALS_MISSING` 500 if unset, same graceful-missing-config pattern as `TYPEBOT_ID`).
 
-**Wired into the conversation flow as a hard gate** — `modules/conversation/services/spotifyGate.js`
-recognizes the "Enter your spotify link" url-input block by its `variableId`
-(`SPOTIFY_URL_VARIABLE_ID`, same hardcoded-until-Studio-changes precedent as
-`conversationFieldMap.js`/`documentTypeMap.js`). `registrationEngine.js`'s `handle()` intercepts an
-answer to that step *before* relaying anything to Typebot: it calls `verifySpotifyClaim()`, which
-checks the claimed track's artist credits against the account's `AccountName` *or* `AccountAlias`
-(`registrationService.getIdentityNames()`). If neither matches (or the URL/Spotify call fails for
-any reason - treated the same as a non-match, never crashes the turn), the answer is **never sent to
-Typebot's `continueChat`** - the session stays exactly where it was, and a rejection message asking
-for another link is returned directly. Only a genuine match lets the turn fall through to the normal
-relay path, advancing the conversation as usual. `actualName` for this check is `AccountName` —
-not the Aadhaar-OCR name (still intentionally unpersisted, see above). Nothing in this app's live
-code path writes `AccountName` (the `basic-details` endpoint that used to derive it from
-`firstName`+`lastName` was removed as chat-flow-orphaned — see "Typebot Registration Flow" above);
-it's populated by whatever created the `App_Accounts` row before the chat flow starts.
-
-`SPOTIFY_VERIFICATION_BYPASS` (default `false`) — dev-only escape hatch for `verifySpotifyClaim()`:
-when `true`, skips the real Spotify API call/match check entirely and always returns verified (logs
-a `logger.warn` each time so a bypass is never silently active). Same purpose as `OTP_PROVIDER=mock`/
-`OCR_PROVIDER=stub` — lets the rest of the conversation flow be tested without owning a real Spotify
-track credited to the exact test account name. **Never leave `true` in a shared/prod `.env`.**
+**This endpoint is legacy relative to the conversation flow.** The old "Spotify hard gate" inside
+`registrationEngine.js` (a `spotifyGate.js` that blocked non-matching links on the "Enter your
+spotify link" step) is **gone** — that step was replaced wholesale by the work-link gate
+(`workLinkGate.js`), which accepts both Spotify *and* YouTube links, resolves them via
+`workLinkResolver.service.js`, and verifies the member against role-labelled credits (not just
+artists) — see "Work links in the conversation flow" below. `POST /spotify/metadata` still exists
+and works as a standalone check/diagnostic, but nothing in the chat path calls it anymore. There is
+no `SPOTIFY_VERIFICATION_BYPASS` env var anymore either — the work-link gate has no bypass flag, it
+degrades to a confirm-and-save flow instead of blocking.
 
 ## Email OTP Verification
 
@@ -668,10 +801,11 @@ with a clear, user-facing error message. Also exposed standalone as `POST /auth/
 `POST /auth/verify-email-otp` (no `authenticate` — usable pre-login), but the conversation flow
 below calls the service directly rather than looping back through HTTP.
 
-**Wired into the conversation flow as a hard gate**, same shape as the Spotify gate —
+**Wired into the conversation flow as a hard gate**, same synthetic-block pattern as the
+OCR-confirmation and work-link gates —
 `modules/conversation/services/emailOtpGate.js` recognizes the "Provide your email id" email-input
 block by its `variableId` (`EMAIL_VARIABLE_ID` — same id already mapped to `AccountEmail` in
-`conversationFieldMap.js`). Unlike Spotify's single pass/fail check, this is a send-then-verify
+`conversationFieldMap.js`). Unlike the work-link loop (pass/fail or loop), this is a send-then-verify
 sub-conversation, tracked via a new `pendingEmailVerification: { email }` field in
 `typebotSessionStore` (same shape/precedent as `pendingDocConfirmation`):
 
@@ -709,7 +843,13 @@ email'` and the real email question re-asks — fill them in `.env` for actual d
 
 ## Testing notes
 
-- DB-dependent test (auth round-trip) auto-skips when SQL Server is unreachable. It runs against a live
-  instance (`npm run setup:db` as Administrator + import `scripts/mra_cleaned.sql` first).
-- The auth round-trip asserts the response echoes the OTP, so it requires `OTP_PROVIDER=mock`
-  (the default). It also exercises `/registration/status` and `/conversation/message` with a real JWT.
+- `npm test` runs every `test/*.test.js` via `node:test`; any single file also runs via
+  `node --test test/<name>.test.js`. Most suites are pure logic (no DB): `workMatch`,
+  `musicCredits`, `progressMap`, `ocrLabels`, `uploadFileName`, `typebotSession`,
+  `emailOtpGate`, `registrationReview`, `gemini`/`youtube` parsing. Suites with a DB-dependent
+  part (auth round-trip, `workLink`, `conversationJournal`, `addressProofReupload`) auto-skip just
+  that part when SQL Server is unreachable.
+- The DB-dependent parts run against a live instance (`npm run setup:db` as Administrator + import
+  `scripts/mra_cleaned.sql` first). The auth round-trip asserts the response echoes the OTP, so it
+  requires `OTP_PROVIDER=mock` (the default). It also exercises `/registration/status` and
+  `/conversation/message` with a real JWT.
