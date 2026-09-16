@@ -27,7 +27,7 @@ function getTransport() {
 export async function sendEmail({ to, subject, text, html, from }) {
   const t = getTransport();
   try {
-    const info = await t.sendMail({ from: from ?? env.SMTP_USER, to, subject, text, html });
+    const info = await t.sendMail({ from: from ?? env.SMTP_FROM ?? env.SMTP_USER, to, subject, text, html });
     logger.debug({ to, subject, msgId: info.messageId }, 'Email sent');
     return info;
   } catch (err) {
