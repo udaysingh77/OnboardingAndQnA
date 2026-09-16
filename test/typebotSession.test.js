@@ -25,6 +25,7 @@ import { appError } from '../src/shared/errors.js';
 import { typebotClient, isDeadSessionError } from '../src/modules/conversation/services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../src/modules/conversation/services/typebot/typebotSessionStore.js';
 import { handle, handleUpload } from '../src/modules/conversation/engines/registrationEngine.js';
+import { paymentService } from '../src/modules/payment/services/payment.service.js';
 import { prisma } from '../src/shared/prisma.js';
 
 // --- the real wire shapes --------------------------------------------------
@@ -178,6 +179,109 @@ test('a healthy turn is untouched', async () => {
   assert.equal(res.input.id, 'next-block');
   assert.equal(/timed out/i.test(texts(res)), false, 'no spurious notice');
   assert.equal(typebotSessionStore.get(USER).sessionId, 'live-session', 'the session id is kept');
+});
+
+// --- isPaymentStep: a stable signal for the frontend to call /payment/initiate -------------------
+
+test('a normal question is not flagged as the payment step', async () => {
+  stubClient({
+    continueChat: () => ({
+      messages: [],
+      input: { id: 'next-block', type: 'text input', options: {} },
+    }),
+  });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  const res = await handle({ userId: USER, token: 't', message: 'hello' });
+
+  assert.equal(res.isPaymentStep, false);
+});
+
+test('confirming the pre-payment review surfaces the real payment button flagged isPaymentStep', async () => {
+  // One of paymentGate.js's real, hardcoded PAYMENT_BLOCK_IDS - "Group #68, item 'payment'".
+  const PAYMENT_BLOCK = { id: 'mqd5zfukd99nkczylu206jo1', type: 'choice input', items: [{ id: 'x', content: 'payment' }] };
+  stubClient({ continueChat: () => { throw new Error('should not be called - the review-confirm branch is local'); } });
+  typebotSessionStore.set(USER, {
+    sessionId: 'live-session',
+    input: LIVE_INPUT,
+    pendingPaymentReview: { input: PAYMENT_BLOCK },
+  });
+
+  const res = await handle({ userId: USER, token: 't', message: 'Yes, everything is correct' });
+
+  assert.equal(res.input.id, PAYMENT_BLOCK.id);
+  assert.equal(res.isPaymentStep, true, 'this is the frontend\'s cue to call POST /payment/initiate instead of relaying the answer');
+});
+
+test('rejecting the pre-payment review still flags the payment button it hands back', async () => {
+  const PAYMENT_BLOCK = { id: 'tjbgzghma2th8et9srotmzt5', type: 'choice input', items: [{ id: 'x', content: 'Pay' }] };
+  stubClient({ continueChat: () => { throw new Error('should not be called'); } });
+  typebotSessionStore.set(USER, {
+    sessionId: 'live-session',
+    input: LIVE_INPUT,
+    pendingPaymentReview: { input: PAYMENT_BLOCK },
+  });
+
+  const res = await handle({ userId: USER, token: 't', message: 'something is wrong' });
+
+  assert.equal(res.input.id, PAYMENT_BLOCK.id);
+  assert.equal(res.isPaymentStep, true);
+});
+
+// --- the payment button is terminal: Typebot is never driven past it ----------------------------
+
+// Every payment block leads straight to Typebot's own "Thank you for your payment." and then the
+// flow ends. Relaying anything at all would play that message and end the session (wiping the
+// journal) for someone who had paid nothing - so continueChat must not be called at all here.
+const PARKED_BLOCK = {
+  id: 'mqd5zfukd99nkczylu206jo1',
+  type: 'choice input',
+  items: [{ id: 'x', content: 'Pay Application Fee' }],
+};
+
+function stubPaid(paid) {
+  const original = paymentService.hasSuccessfulPayment;
+  paymentService.hasSuccessfulPayment = async () => paid;
+  return () => { paymentService.hasSuccessfulPayment = original; };
+}
+
+test('typing at the payment button does not relay to Typebot when nothing has been paid', async () => {
+  stubClient({ continueChat: () => { throw new Error('continueChat must not be called at the payment button'); } });
+  const restore = stubPaid(false);
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: PARKED_BLOCK });
+
+  try {
+    const res = await handle({ userId: USER, token: 't', message: 'Pay' });
+
+    assert.equal(calls.continueChat.length, 0, 'Typebot must never see this as the button being answered');
+    assert.equal(res.sessionEnded, false, 'the session must not end - that is what used to clear the journal');
+    assert.equal(res.input.id, PARKED_BLOCK.id, 'the member stays parked on the same button');
+    assert.equal(res.isPaymentStep, true);
+    assert.match(texts(res), /haven't received your payment/i);
+    assert.doesNotMatch(texts(res), /thank you for your payment/i);
+  } finally {
+    restore();
+  }
+});
+
+test('typing at the payment button after paying points the member at support, still without relaying', async () => {
+  // Only reachable when complete() is still refusing - a completed registration routes to the Q&A
+  // engine instead, so this member has paid but something required is missing.
+  stubClient({ continueChat: () => { throw new Error('continueChat must not be called at the payment button'); } });
+  const restore = stubPaid(true);
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: PARKED_BLOCK });
+
+  try {
+    const res = await handle({ userId: USER, token: 't', message: 'done' });
+
+    assert.equal(calls.continueChat.length, 0);
+    assert.equal(res.sessionEnded, false);
+    assert.equal(res.input.id, PARKED_BLOCK.id);
+    assert.match(texts(res), /received your payment/i);
+    assert.match(texts(res), new RegExp(USER), 'the registration id support will ask for');
+  } finally {
+    restore();
+  }
 });
 
 // --- the upload path -------------------------------------------------------

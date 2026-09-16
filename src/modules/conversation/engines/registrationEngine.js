@@ -35,8 +35,11 @@ import {
   confirmsReview,
   describeReview,
   describeCorrection,
+  describePaymentPending,
+  describePaymentReceived,
   PAYMENT_REVIEW_INPUT,
 } from '../services/typebot/paymentGate.js';
+import { paymentService } from '../../payment/services/payment.service.js';
 import { registrationReviewService, renderSections } from '../../registration/services/registrationReview.service.js';
 import { resolveProgress } from '../services/typebot/progressMap.js';
 import {
@@ -404,7 +407,18 @@ async function resumeFromJournal({ userId, token }) {
 /**
  * @param {{ userId: string, token: string, message?: string, attachedFileUrls?: string[] }} input
  */
-export async function handle({ userId, token, message, attachedFileUrls }) {
+export async function handle(args) {
+  const result = await handleCore(args);
+  // A stable, explicit signal for the frontend: "this input is the real payment button - call
+  // POST /payment/initiate instead of relaying it as a chat message." Without this the frontend
+  // would have to guess by matching Typebot's own block ids or button label text, which breaks
+  // silently on republish (same fragility paymentGate.js's own PAYMENT_BLOCK_IDS comment warns
+  // about) - one central place computes it here instead of at every return statement below,
+  // including the ones inside resumeFromJournal() that this wraps too.
+  return { ...result, isPaymentStep: isPaymentStep(result.input?.id) };
+}
+
+async function handleCore({ userId, token, message, attachedFileUrls }) {
   // A blank message is not an answer to anything - Typebot rejects empty text on every input type,
   // and the validator lets `message: ""` through, so a client that always sends the field (Apidog,
   // a form that posts an empty box) would otherwise be treated as if it had said something. Every
@@ -608,6 +622,23 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
       messages: [textMessage('payment-review-correction', describeCorrection(userId))],
       input,
       progress: resolveProgress(input.id),
+    };
+  }
+
+  // The payment button is where this flow stops. Paying happens through /payment/initiate and the
+  // PayU callback, never through Typebot - so an answer arriving here is not a payment, it's a
+  // member typing into the chat. Relaying it used to hand Typebot the button's own answer, which
+  // played its scripted "Thank you for your payment.", ended the session and cleared the journal,
+  // all for a member who had paid nothing. Hold them on the button instead.
+  if (existing?.input && isPaymentStep(existing.input.id) && message !== undefined) {
+    const paid = await paymentService.hasSuccessfulPayment(userId);
+    return {
+      sessionEnded: false,
+      messages: [
+        textMessage('payment-pending', paid ? describePaymentReceived(userId) : describePaymentPending()),
+      ],
+      input: existing.input,
+      progress: resolveProgress(existing.input.id),
     };
   }
 
@@ -992,7 +1023,15 @@ export async function handle({ userId, token, message, attachedFileUrls }) {
 /**
  * @param {{ userId: string, token: string, file: { originalname: string, mimetype: string, size: number, buffer: Buffer } }} input
  */
-export async function handleUpload({ userId, token, file }) {
+export async function handleUpload(args) {
+  const result = await handleUploadCore(args);
+  // Same stable contract as handle() - see its comment. A file upload never itself lands on the
+  // payment button, but keeping the field present on every response (rather than only from
+  // handle()) means the frontend never has to special-case which endpoint it called.
+  return { ...result, isPaymentStep: isPaymentStep(result.input?.id) };
+}
+
+async function handleUploadCore({ userId, token, file }) {
   const session = typebotSessionStore.get(userId);
   if (!session?.input || session.input.type !== 'file input') {
     throw badRequestError('No active file-upload step in the conversation');

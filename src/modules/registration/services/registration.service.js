@@ -8,6 +8,7 @@ import { env } from '../../../config/env.js';
 import { logger } from '../../../utils/logger.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { createOcrProvider } from './ocr/ocrProvider.factory.js';
+import { paymentRepository } from '../../payment/repositories/payment.repository.js';
 
 const REGISTERED = 1;
 const DOC_TYPES = Object.freeze({
@@ -405,6 +406,14 @@ async function complete(userId, registrationId) {
   for (const group of REQUIRED_DOC_GROUPS) {
     if (!group.types.some((docType) => uploadedTypes.has(docType))) missing.push(group.label);
   }
+
+  // The Typebot flow's own "Pay" block is just a normal choice input - answering it in chat (even
+  // by hand, bypassing the frontend entirely) advances the conversation to Typebot's own scripted
+  // "Thank you" closing message with no real PayU charge involved. Importing paymentRepository
+  // directly (not paymentService) here is deliberate: payment.service.js already imports
+  // registrationService to call complete() after a real PayU success, so importing the service back
+  // would be circular - the repository has no such dependency.
+  if (!(await paymentRepository.hasSuccessfulPayment(registrationId))) missing.push('payment');
 
   if (missing.length > 0) {
     throw badRequestError(`Registration incomplete: missing ${missing.join(', ')}`, {

@@ -1,14 +1,20 @@
 {
   "info": {
     "_postman_id": "9f1c9e2a-4b3d-4a4e-9a3a-6a1f0b2c1e01",
-    "name": "IPRS Backend - Conversation Relay Flow",
-    "description": "Only the APIs the frontend actually calls for the onboarding flow: OTP auth, then the backend-driven Typebot conversation relay. The frontend never talks to Typebot directly - it only calls /conversation/message and /conversation/upload, and this backend drives Typebot's own Chat API behind the scenes.\n\n## Global envelopes\n\nSuccess: `{ \"success\": true, \"data\": { ... }, \"meta\"?: { ... } }`\n\nError: `{ \"success\": false, \"error\": { \"code\": \"...\", \"message\": \"...\", \"details\"?: { ... } } }`\n\nCommon error codes: `VALIDATION_ERROR` (422, bad request body/params), `UNAUTHORIZED` (401, missing/invalid/expired token), `FORBIDDEN` (403), `NOT_FOUND` (404), `TYPEBOT_NOT_CONFIGURED` (503), `TYPEBOT_REQUEST_FAILED`, `UPLOAD_ERROR` (400, file too large/bad multipart), `INTERNAL_ERROR` (500).\n\n## Flow\n\n1. `POST /auth/send-otp` with a phone number.\n2. `POST /auth/verify-otp` with the same phone + the OTP -> get back a JWT `token`. This request's test script auto-saves it into the `{{token}}` collection variable, so every request below is pre-wired.\n3. `POST /conversation/message` with an empty body `{}` to start the Typebot session - returns the bot's greeting plus `data.input` describing what to render next.\n4. Loop: look at `data.input.type` to decide what UI to show, then respond:\n   - `\"text input\"` / `\"email input\"` / `\"url input\"` -> send the user's typed answer as `POST /conversation/message` with `{ \"message\": \"<answer>\" }`.\n   - `\"choice input\"` -> send the EXACT text of the chosen `data.input.items[].content` as `{ \"message\": \"<that text>\" }`.\n   - `\"file input\"` -> switch to `POST /conversation/upload` (multipart, field name `file`) instead of /message. The backend uploads the file to Typebot's storage, runs OCR when applicable, and advances the conversation for you.\n5. Keep looping until the response has no `data.input` (or `data.sessionEnded: true`) - conversation is over.\n6. `POST /auth/logout` when the user signs out.\n\n`data.messages` is Typebot's own rich-text message array - render each block's `content.richText` as-is. `data.input` mirrors Typebot's own input-block shape (`id`, `type`, `items` for choices, `options.variableId` when relevant) - pass it through mostly unchanged, don't invent your own shape on top of it.",
+    "name": "IPRS Backend - Conversation Relay & Payment Flow",
+    "description": "APIs for the onboarding flow: OTP auth, backend-driven Typebot conversation relay, and PayU payment integration.\n\n## Global envelopes\n\nSuccess: `{ \"success\": true, \"data\": { ... }, \"meta\"?: { ... } }`\n\nError: `{ \"success\": false, \"error\": { \"code\": \"...\", \"message\": \"...\", \"details\"?: { ... } } }`\n\nCommon error codes: `VALIDATION_ERROR` (422, bad request body/params), `UNAUTHORIZED` (401, missing/invalid/expired token), `FORBIDDEN` (403), `NOT_FOUND` (404), `TYPEBOT_NOT_CONFIGURED` (503), `TYPEBOT_REQUEST_FAILED`, `UPLOAD_ERROR` (400, file too large/bad multipart), `INTERNAL_ERROR` (500).\n\n## Flow\n\n1. `POST /auth/send-otp` with a phone number.\n2. `POST /auth/verify-otp` with the same phone + the OTP -> get back a JWT `token`. This request's test script auto-saves it into the `{{token}}` collection variable.\n3. `POST /conversation/message` with an empty body `{}` to start the Typebot session.\n4. Advance the chat through questions and document uploads (`/conversation/upload`).\n5. Pre-payment review & `POST /payment/initiate` to generate PayU payment hash & transaction ID.\n6. PayU checkout submission or simulated `POST /payment/callback` webhook confirmation.\n7. Check transaction status with `GET /payment/status/{{txnId}}` or history with `GET /payment/history`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:4000", "type": "string" },
     { "key": "token", "value": "", "type": "string" },
-    { "key": "phone", "value": "+15551234567", "type": "string" }
+    { "key": "phone", "value": "919892807545", "type": "string" },
+    { "key": "payuKey", "value": "zJ2jYh", "type": "string" },
+    { "key": "payuSalt", "value": "QB0YB88AVqKnFYjetWGR7ZXBvlhczjPl", "type": "string" },
+    { "key": "txnId", "value": "", "type": "string" },
+    { "key": "udf1", "value": "", "type": "string" },
+    { "key": "firstname", "value": "", "type": "string" },
+    { "key": "email", "value": "", "type": "string" }
   ],
   "item": [
     {
@@ -30,7 +36,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "send-otp"]
             },
-            "description": "phone must match /^\\+?[1-9]\\d{9,14}$/ (9-14 digits, optional leading +). Rate-limited (stricter auth limiter). In dev (OTP_PROVIDER=mock), data.otp echoes the OTP so you don't need real SMS - omitted when a real SMS provider is configured."
+            "description": "phone must match /^\\+?[1-9]\\d{9,14}$/ (9-14 digits, optional leading +). In dev (OTP_PROVIDER=mock), data.otp echoes the OTP."
           },
           "response": [
             {
@@ -59,6 +65,11 @@
                   "if (pm.response.code === 200) {",
                   "  const json = pm.response.json();",
                   "  pm.collectionVariables.set('token', json.data.token);",
+                  "  if (json.data.user) {",
+                  "    pm.collectionVariables.set('udf1', String(json.data.user.id || ''));",
+                  "    pm.collectionVariables.set('firstname', json.data.user.name || 'Member');",
+                  "    pm.collectionVariables.set('email', json.data.user.email || '');",
+                  "  }",
                   "}"
                 ]
               }
@@ -78,7 +89,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "verify-otp"]
             },
-            "description": "otp must match /^\\d{4,6}$/. On success, this request's Test script auto-saves the JWT into {{token}} so every request below Just Works. registrationStatus is 'started' or 'completed' (derived from ApplicationStatus === 1)."
+            "description": "On success, saves JWT token into {{token}} collection variable."
           },
           "response": [
             {
@@ -92,20 +103,7 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"id\": \"3\",\n      \"phone\": \"+15551234567\",\n      \"name\": null,\n      \"email\": null,\n      \"registrationStatus\": \"started\"\n    },\n    \"token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzIn0.abc123\"\n  }\n}"
-            },
-            {
-              "name": "400 Bad Request (invalid/expired OTP)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [{ "key": "Content-Type", "value": "application/json" }],
-                "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"otp\": \"000000\"\n}" },
-                "url": { "raw": "{{baseUrl}}/auth/verify-otp", "host": ["{{baseUrl}}"], "path": ["auth", "verify-otp"] }
-              },
-              "status": "Bad Request",
-              "code": 400,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": false,\n  \"error\": {\n    \"code\": \"INVALID_OTP\",\n    \"message\": \"Invalid or expired OTP\"\n  }\n}"
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"id\": \"10827\",\n      \"phone\": \"919892807545\",\n      \"name\": \"CHOIRA MUSICTECHPRIVATE LIMITED\",\n      \"email\": \"suday7807@gmail.com\",\n      \"registrationStatus\": \"started\"\n    },\n    \"token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n  }\n}"
             }
           ]
         },
@@ -121,7 +119,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["auth", "logout"]
             },
-            "description": "Blacklists the current token's jti until its natural expiry. Requires Authorization: Bearer <token>."
+            "description": "Blacklists current token."
           },
           "response": [
             {
@@ -160,90 +158,9 @@
               "host": ["{{baseUrl}}"],
               "path": ["conversation", "message"]
             },
-            "description": "Call with an empty body `{}` (or omit `message`) for the very first call to start a session. After that, send `{ \"message\": \"<user's answer>\" }` each turn - for choice inputs, `message` must exactly match the chosen item's `content` text. `engine` in the response is 'REGISTRATION' (Typebot relay) or 'AI' (Week-1 stub, only once fully registered). Loop on `data.input` to know what to render next; when `data.input.type === \"file input\"`, use the Upload request instead of this one."
+            "description": "Call with empty body `{}` to start a session, or send `{ \"message\": \"<answer>\" }` each turn."
           },
-          "response": [
-            {
-              "name": "200 OK - first call (session start)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [
-                  { "key": "Authorization", "value": "Bearer {{token}}" },
-                  { "key": "Content-Type", "value": "application/json" }
-                ],
-                "body": { "mode": "raw", "raw": "{}" },
-                "url": { "raw": "{{baseUrl}}/conversation/message", "host": ["{{baseUrl}}"], "path": ["conversation", "message"] }
-              },
-              "status": "OK",
-              "code": 200,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"engine\": \"REGISTRATION\",\n    \"sessionEnded\": false,\n    \"messages\": [\n      {\n        \"id\": \"v5p8bzfnnv0ci3v97uipm5cd\",\n        \"type\": \"text\",\n        \"content\": {\n          \"type\": \"richText\",\n          \"richText\": [\n            { \"type\": \"p\", \"children\": [{ \"text\": \"Hello! I am your IPRS assistant.\" }] }\n          ]\n        }\n      },\n      {\n        \"id\": \"puvauqwelunwild0mgmsaatf\",\n        \"type\": \"text\",\n        \"content\": {\n          \"type\": \"richText\",\n          \"richText\": [\n            { \"type\": \"p\", \"children\": [{ \"text\": \"I help musicians join IPRS so you get paid when your songs are played. Do you want to become an IPRS member?\" }] }\n          ]\n        }\n      }\n    ],\n    \"input\": {\n      \"id\": \"q4x4jbosh8vw29siyh76exkb\",\n      \"type\": \"choice input\",\n      \"items\": [\n        { \"id\": \"zxa0ejmk9iws9b69wvubd0mt\", \"outgoingEdgeId\": \"pwuqin0hbpt8qdkjn39h92wf\", \"content\": \"Yes, I want to become a member\" }\n      ]\n    },\n    \"progress\": null\n  }\n}"
-            },
-            {
-              "name": "200 OK - continue (choice answer -> next text question)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [
-                  { "key": "Authorization", "value": "Bearer {{token}}" },
-                  { "key": "Content-Type", "value": "application/json" }
-                ],
-                "body": { "mode": "raw", "raw": "{\n  \"message\": \"Yes, I want to become a member\"\n}" },
-                "url": { "raw": "{{baseUrl}}/conversation/message", "host": ["{{baseUrl}}"], "path": ["conversation", "message"] }
-              },
-              "status": "OK",
-              "code": 200,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"engine\": \"REGISTRATION\",\n    \"sessionEnded\": false,\n    \"messages\": [\n      {\n        \"id\": \"twfqj9hxsimj1fg8ymubwpsh\",\n        \"type\": \"text\",\n        \"content\": {\n          \"type\": \"richText\",\n          \"richText\": [{ \"type\": \"p\", \"children\": [{ \"text\": \"Provide your email id\" }] }]\n        }\n      }\n    ],\n    \"input\": {\n      \"id\": \"r996l2k8r3h2o2npan3ktka2\",\n      \"outgoingEdgeId\": \"vn7wwzoreozslumxiefilj1m\",\n      \"type\": \"email input\",\n      \"options\": { \"variableId\": \"virpfcnue17syf7ua2hbuj5d1\" }\n    },\n    \"progress\": null\n  }\n}"
-            },
-            {
-              "name": "200 OK - file input step (switch to Upload request)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [
-                  { "key": "Authorization", "value": "Bearer {{token}}" },
-                  { "key": "Content-Type", "value": "application/json" }
-                ],
-                "body": { "mode": "raw", "raw": "{\n  \"message\": \"rishi@gmail.com\"\n}" },
-                "url": { "raw": "{{baseUrl}}/conversation/message", "host": ["{{baseUrl}}"], "path": ["conversation", "message"] }
-              },
-              "status": "OK",
-              "code": 200,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"engine\": \"REGISTRATION\",\n    \"sessionEnded\": false,\n    \"messages\": [\n      {\n        \"id\": \"n4huvqufms5qjl5wn4wk3igs\",\n        \"type\": \"text\",\n        \"content\": {\n          \"type\": \"richText\",\n          \"richText\": [{ \"type\": \"p\", \"children\": [{ \"text\": \"Upload Address Proof (Aadhaar). I'll read everything from the photo.\" }] }]\n        }\n      }\n    ],\n    \"input\": {\n      \"id\": \"ksz9hqh7dj2yr93kdiutpfi5\",\n      \"outgoingEdgeId\": \"p6z25xo62a1fimedkgtnzald\",\n      \"type\": \"file input\",\n      \"options\": { \"variableId\": \"vyxe6vz0095q0uc39pssv3m6i\" }\n    },\n    \"progress\": null\n  }\n}"
-            },
-            {
-              "name": "200 OK - conversation ended (no more input)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [
-                  { "key": "Authorization", "value": "Bearer {{token}}" },
-                  { "key": "Content-Type", "value": "application/json" }
-                ],
-                "body": { "mode": "raw", "raw": "{\n  \"message\": \"done\"\n}" },
-                "url": { "raw": "{{baseUrl}}/conversation/message", "host": ["{{baseUrl}}"], "path": ["conversation", "message"] }
-              },
-              "status": "OK",
-              "code": 200,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"engine\": \"REGISTRATION\",\n    \"sessionEnded\": true,\n    \"messages\": [\n      {\n        \"id\": \"final1\",\n        \"type\": \"text\",\n        \"content\": { \"type\": \"richText\", \"richText\": [{ \"type\": \"p\", \"children\": [{ \"text\": \"Thanks! Your application is submitted.\" }] }] }\n      }\n    ],\n    \"input\": null,\n    \"progress\": null\n  }\n}"
-            },
-            {
-              "name": "503 Service Unavailable (Typebot not configured)",
-              "originalRequest": {
-                "method": "POST",
-                "header": [
-                  { "key": "Authorization", "value": "Bearer {{token}}" },
-                  { "key": "Content-Type", "value": "application/json" }
-                ],
-                "body": { "mode": "raw", "raw": "{}" },
-                "url": { "raw": "{{baseUrl}}/conversation/message", "host": ["{{baseUrl}}"], "path": ["conversation", "message"] }
-              },
-              "status": "Service Unavailable",
-              "code": 503,
-              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": false,\n  \"error\": {\n    \"code\": \"TYPEBOT_NOT_CONFIGURED\",\n    \"message\": \"Typebot is not configured yet (TYPEBOT_ID is unset)\"\n  }\n}"
-            }
-          ]
+          "response": []
         },
         {
           "name": "Upload File (file input step)",
@@ -263,34 +180,200 @@
               "host": ["{{baseUrl}}"],
               "path": ["conversation", "upload"]
             },
-            "description": "multipart/form-data, single field named `file`. Only valid when the current conversation step's `data.input.type === \"file input\"` (from the last /conversation/message response) - otherwise 400 \"No active file-upload step in the conversation\". Max size = MAX_UPLOAD_SIZE_MB (server config). Response shape is identical to /conversation/message's REGISTRATION-engine result - keep looping the same way afterwards. Do NOT set a Content-Type header manually; let Postman/the HTTP client set the multipart boundary."
+            "description": "multipart/form-data upload when `data.input.type === 'file input'`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Payment",
+      "item": [
+        {
+          "name": "1. Initiate Payment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.data) {",
+                  "    pm.collectionVariables.set('txnId', json.data.txnId || '');",
+                  "    pm.collectionVariables.set('amount', json.data.amount || '1000.00');",
+                  "    pm.collectionVariables.set('payuKey', json.data.key || 'zJ2jYh');",
+                  "    if (json.data.params) {",
+                  "      if (json.data.params.udf1) pm.collectionVariables.set('udf1', json.data.params.udf1);",
+                  "      if (json.data.params.firstname) pm.collectionVariables.set('firstname', json.data.params.firstname);",
+                  "      if (json.data.params.email) pm.collectionVariables.set('email', json.data.params.email);",
+                  "    }",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 1000,\n  \"productInfo\": \"IPRS Membership Onboarding Fee\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/payment/initiate",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment", "initiate"]
+            },
+            "description": "Initiates a PayU payment transaction in PENDING state, calculates the request SHA-512 hash, and automatically sets {{txnId}}, {{amount}}, {{udf1}}, {{firstname}}, and {{email}} into collection variables."
           },
           "response": [
             {
-              "name": "200 OK - advances to next step",
+              "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
-                "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
-                "url": { "raw": "{{baseUrl}}/conversation/upload", "host": ["{{baseUrl}}"], "path": ["conversation", "upload"] }
+                "header": [
+                  { "key": "Authorization", "value": "Bearer {{token}}" },
+                  { "key": "Content-Type", "value": "application/json" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"amount\": 1000,\n  \"productInfo\": \"IPRS Membership Onboarding Fee\"\n}"
+                },
+                "url": { "raw": "{{baseUrl}}/payment/initiate", "host": ["{{baseUrl}}"], "path": ["payment", "initiate"] }
               },
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"sessionEnded\": false,\n    \"messages\": [\n      {\n        \"id\": \"n5eswnkvb8eq7krnczw1bs3f\",\n        \"type\": \"text\",\n        \"content\": { \"type\": \"richText\", \"richText\": [{ \"type\": \"p\", \"children\": [{ \"text\": \"Upload Pan details\" }] }] }\n      }\n    ],\n    \"input\": {\n      \"id\": \"f51qeu63n3bjo2tvcjnuf97u\",\n      \"outgoingEdgeId\": \"lkbhzen73zndsq6mo2sgd429\",\n      \"type\": \"file input\",\n      \"options\": { \"variableId\": \"vv1cibnnnutoy8v7ozdv6a908\" }\n    },\n    \"progress\": null\n  }\n}"
-            },
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"payment\": {\n      \"paymentId\": \"1\",\n      \"userId\": \"10827\",\n      \"txnId\": \"IPRS_10827_1789476842612_f75e7774\",\n      \"amount\": 1000,\n      \"currency\": \"INR\",\n      \"status\": \"PENDING\",\n      \"createdAt\": \"2026-09-15T12:54:02.000Z\"\n    },\n    \"key\": \"zJ2jYh\",\n    \"txnId\": \"IPRS_10827_1789476842612_f75e7774\",\n    \"amount\": \"1000.00\",\n    \"currency\": \"INR\",\n    \"hash\": \"calculated_sha512_hash\",\n    \"actionUrl\": \"https://test.payu.in/_payment\",\n    \"params\": {\n      \"key\": \"zJ2jYh\",\n      \"txnid\": \"IPRS_10827_1789476842612_f75e7774\",\n      \"amount\": \"1000.00\",\n      \"productinfo\": \"IPRS Membership Onboarding Fee\",\n      \"firstname\": \"CHOIRA MUSICTECHPRIVATE LIMITED\",\n      \"email\": \"suday7807@gmail.com\",\n      \"phone\": \"919892807545\",\n      \"surl\": \"https://test.payu.in/admin/test_response\",\n      \"furl\": \"https://test.payu.in/admin/test_response\",\n      \"hash\": \"calculated_sha512_hash\",\n      \"udf1\": \"10827\"\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Simulate PayU Webhook Callback (Success)",
+          "event": [
             {
-              "name": "400 Bad Request (no active file-upload step)",
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const salt = pm.collectionVariables.get('payuSalt') || 'QB0YB88AVqKnFYjetWGR7ZXBvlhczjPl';",
+                  "const key = pm.collectionVariables.get('payuKey') || 'zJ2jYh';",
+                  "const status = 'success';",
+                  "const udf1 = pm.collectionVariables.get('udf1') || '10827';",
+                  "const email = pm.collectionVariables.get('email') || 'suday7807@gmail.com';",
+                  "const firstname = pm.collectionVariables.get('firstname') || 'CHOIRA MUSICTECHPRIVATE LIMITED';",
+                  "const productinfo = 'IPRS Membership Onboarding Fee';",
+                  "const amount = pm.collectionVariables.get('amount') || '1000.00';",
+                  "const txnid = pm.collectionVariables.get('txnId');",
+                  "",
+                  "// Reverse hash: salt|status|udf10..udf1|email|firstname|productinfo|amount|txnid|key",
+                  "const elements = [salt, status, '', '', '', '', '', '', '', '', '', udf1, email, firstname, productinfo, amount, txnid, key];",
+                  "const str = elements.join('|');",
+                  "const hash = CryptoJS.SHA512(str).toString();",
+                  "pm.variables.set('calculated_callback_hash', hash);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"txnid\": \"{{txnId}}\",\n  \"status\": \"success\",\n  \"amount\": \"{{amount}}\",\n  \"productinfo\": \"IPRS Membership Onboarding Fee\",\n  \"firstname\": \"{{firstname}}\",\n  \"email\": \"{{email}}\",\n  \"udf1\": \"{{udf1}}\",\n  \"mihpayid\": \"403993715531234567\",\n  \"mode\": \"UPI\",\n  \"bank_ref_num\": \"UPI/2026/987654\",\n  \"key\": \"{{payuKey}}\",\n  \"hash\": \"{{calculated_callback_hash}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/payment/callback",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment", "callback"]
+            },
+            "description": "Simulates PayU's webhook callback to update transaction status to SUCCESS. The pre-request script calculates the reverse SHA-512 hash dynamically using {{payuSalt}}, {{amount}}, and {{txnId}}."
+          },
+          "response": [
+            {
+              "name": "200 OK",
               "originalRequest": {
                 "method": "POST",
-                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
-                "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
-                "url": { "raw": "{{baseUrl}}/conversation/upload", "host": ["{{baseUrl}}"], "path": ["conversation", "upload"] }
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "Accept", "value": "application/json" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"txnid\": \"{{txnId}}\",\n  \"status\": \"success\",\n  \"amount\": \"1000.00\",\n  \"productinfo\": \"IPRS Membership Onboarding Fee\",\n  \"firstname\": \"CHOIRA MUSICTECHPRIVATE LIMITED\",\n  \"email\": \"suday7807@gmail.com\",\n  \"udf1\": \"10827\",\n  \"mihpayid\": \"403993715531234567\",\n  \"mode\": \"UPI\",\n  \"bank_ref_num\": \"UPI/2026/987654\",\n  \"key\": \"zJ2jYh\",\n  \"hash\": \"calculated_reverse_hash\"\n}"
+                },
+                "url": { "raw": "{{baseUrl}}/payment/callback", "host": ["{{baseUrl}}"], "path": ["payment", "callback"] }
               },
-              "status": "Bad Request",
-              "code": 400,
+              "status": "OK",
+              "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
-              "body": "{\n  \"success\": false,\n  \"error\": {\n    \"code\": \"BAD_REQUEST\",\n    \"message\": \"No active file-upload step in the conversation\"\n  }\n}"
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"paymentId\": \"1\",\n    \"userId\": \"10827\",\n    \"txnId\": \"IPRS_10827_1789476842612_f75e7774\",\n    \"mihPayId\": \"403993715531234567\",\n    \"amount\": 1000,\n    \"currency\": \"INR\",\n    \"status\": \"SUCCESS\",\n    \"paymentMode\": \"UPI\",\n    \"bankRefNo\": \"UPI/2026/987654\",\n    \"productInfo\": \"IPRS Membership Onboarding Fee\",\n    \"customerName\": \"CHOIRA MUSICTECHPRIVATE LIMITED\",\n    \"customerEmail\": \"suday7807@gmail.com\",\n    \"customerPhone\": \"919892807545\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "3. Get Payment Status by TxnId",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payment/status/{{txnId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment", "status", "{{txnId}}"]
+            },
+            "description": "Fetches status of the transaction {{txnId}} for the authenticated member."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": { "raw": "{{baseUrl}}/payment/status/{{txnId}}", "host": ["{{baseUrl}}"], "path": ["payment", "status", "{{txnId}}"] }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"paymentId\": \"1\",\n    \"userId\": \"10827\",\n    \"txnId\": \"IPRS_10827_1789476842612_f75e7774\",\n    \"mihPayId\": \"403993715531234567\",\n    \"amount\": 1000,\n    \"currency\": \"INR\",\n    \"status\": \"SUCCESS\",\n    \"paymentMode\": \"UPI\",\n    \"bankRefNo\": \"UPI/2026/987654\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "4. Get Payment History",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payment/history",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment", "history"]
+            },
+            "description": "Lists all payment transactions for the authenticated member."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+                "url": { "raw": "{{baseUrl}}/payment/history", "host": ["{{baseUrl}}"], "path": ["payment", "history"] }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json; charset=utf-8" }],
+              "body": "{\n  \"success\": true,\n  \"data\": [\n    {\n      \"paymentId\": \"1\",\n      \"userId\": \"10827\",\n      \"txnId\": \"IPRS_10827_1789476842612_f75e7774\",\n      \"amount\": 1000,\n      \"status\": \"SUCCESS\",\n      \"paymentMode\": \"UPI\"\n    }\n  ]\n}"
             }
           ]
         }

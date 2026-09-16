@@ -150,10 +150,10 @@ const PROGRESS_BY_BLOCK = {
   s3ve6kasl1rkiun2n9fgtjxu:  94, // url input    workUrl
   uycu77l5avn789uonzyw4nd1:  94, // url input    workUrl
   xnbvoocex284qeg48jbi6ufr:  94, // url input    workUrl
-  ufpca0wnuwznk2ks7qbv39py:  96, // choice input Pay
-  mqd5zfukd99nkczylu206jo1:  97, // choice input payment
-  o6vjstq2do6uuy67wfbzg451:  97, // choice input payment
-  tjbgzghma2th8et9srotmzt5:  97, // choice input Pay
+  ufpca0wnuwznk2ks7qbv39py:  96, // choice input Pay Application Fee
+  mqd5zfukd99nkczylu206jo1:  97, // choice input Pay Application Fee
+  o6vjstq2do6uuy67wfbzg451:  97, // choice input Pay Application Fee
+  tjbgzghma2th8et9srotmzt5:  97, // choice input Pay Application Fee
 };
 
 // null for an unknown block - the caller passes that straight through, so a block added in Studio
