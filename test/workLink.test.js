@@ -5,12 +5,20 @@
 // The gate's own vocabulary is pure and always runs; persistence needs
 // SQL Server and is skipped when it isn't reachable.
 //
-// THE RULE THIS FILE DEFENDS: IPRS is a rights society, so
-// Author_Composer, Author_Lyricist, LanguageNames, WorkCategory and
-// DocLink are legally meaningful and are left null for staff. Nothing
-// we can call sources them truthfully - Spotify returns one unlabelled
-// bag of artists mixing performers with writers, and a YouTube title is
-// a sentence. An empty column beats an invented credit.
+// THE RULE THIS FILE DEFENDS: IPRS is a rights society, so a credit is
+// written only when a source actually LABELLED it, never inferred. An
+// empty column beats an invented credit.
+//
+// Author_Composer and Author_Lyricist are now filled - but only from the
+// credits service's role-labelled output (Spotify's own contributor
+// roles, or the credit block in a YouTube description), AND only when
+// the confirming member's own on-file name is itself inside that role's
+// list (`memberNames`) - a role-labelled list describes the SONG, not
+// whichever member happens to be confirming it. When either condition
+// fails, the columns stay null exactly as before; the old Spotify artist
+// bag and YouTube title never fill them either, because neither says who
+// wrote the song. LanguageNames, WorkCategory and DocLink stay null
+// always - nothing we can call sources them truthfully.
 // Run: npm test
 // ==================================================================
 import { test, before, after } from 'node:test';
@@ -60,10 +68,34 @@ test('the song card shows only fields the provider actually returned', () => {
   assert.equal(/Released/.test(sparse), false);
 });
 
+test('the song card shows role-labelled credits when the service supplied them', () => {
+  const withRoles = describeSong({
+    songName: 'Apna Bana Le',
+    artists: ['Arijit Singh'],
+    filmOrAlbum: 'Bhediya',
+    composers: ['Sachin-Jigar'],
+    lyricists: ['Amitabh Bhattacharya'],
+  });
+  assert.match(withRoles, /Composer: Sachin-Jigar/);
+  assert.match(withRoles, /Lyricist: Amitabh Bhattacharya/);
+
+  // Absent when the credits service had nothing - no blank "Composer:" line.
+  const withoutRoles = describeSong({ songName: 'Song', artists: ['Someone'], composers: [], lyricists: [] });
+  assert.equal(/Composer/.test(withoutRoles), false);
+  assert.equal(/Lyricist/.test(withoutRoles), false);
+});
+
 test('the credits prompt invites several names at once', () => {
   const message = describeCredits({ artists: ['Pritam', 'Arijit Singh'] });
   assert.match(message, /Pritam, Arijit Singh/);
   assert.match(message, /separated by commas/i);
+
+  // Every credited name is listed, not just the performers - a member credited only as the
+  // lyricist has to be able to see themselves in that list.
+  assert.match(
+    describeCredits({ artists: ['Arijit Singh'], credits: ['Arijit Singh', 'Amitabh Bhattacharya'] }),
+    /Amitabh Bhattacharya/,
+  );
 
   // Falls back to the channel name when the title could not be parsed into artists.
   assert.match(describeCredits({ artists: [], channelName: 'T-Series' }), /T-Series/);
@@ -119,10 +151,12 @@ const spotifyTrack = (n = 1) => ({
   credits: ['Pritam', 'Arijit Singh'],
 });
 
-test('a saved link keeps the rights columns null', async (t) => {
+test('a link with no role-labelled credits leaves the writer columns null', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
   const userId = await makeAccount();
 
+  // spotifyTrack() carries artists but no composers/lyricists - the shape the resolver returns
+  // when the credits service is off or had nothing. An artist list is not a writer credit.
   const row = await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(), matched: true });
 
   assert.equal(row.SongName, 'Song 1');
@@ -130,12 +164,114 @@ test('a saved link keeps the rights columns null', async (t) => {
   assert.equal(row.Artist_Singers, 'Pritam, Arijit Singh');
   assert.equal(Number(row.ReleaseYear), 2022);
 
-  // The whole point: these are for staff, never for us to guess.
-  assert.equal(row.Author_Composer, null);
-  assert.equal(row.Author_Lyricist, null);
+  assert.equal(row.Author_Composer, null, 'an artist bag must never become a composer credit');
+  assert.equal(row.Author_Lyricist, null, 'an artist bag must never become a lyricist credit');
+
+  // Still nothing we can source truthfully - these remain for staff.
   assert.equal(row.LanguageNames, null);
   assert.equal(row.WorkCategory, null);
   assert.equal(row.DocLink, null);
+});
+
+test('role-labelled credits are written to the writer columns when the member IS that writer', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: {
+      ...spotifyTrack(),
+      composers: ['Sachin-Jigar'],
+      // Duplicates collapse, and several writers share the one column.
+      lyricists: ['Amitabh Bhattacharya', 'Amitabh Bhattacharya', 'Priya Saraiya'],
+    },
+    matched: true,
+    // The member's own on-file name is itself in the composers list - that is what earns the write.
+    memberNames: ['Sachin-Jigar'],
+  });
+
+  assert.equal(row.Author_Composer, 'Sachin-Jigar');
+  // The member matched as composer, not lyricist - but the full lyricist credit still gets written,
+  // because the column records the song's own lyricist(s), not only names the member matched under.
+  assert.equal(row.Author_Lyricist, null, "matching as composer doesn't also unlock the lyricist column");
+
+  // Never sourced, so never written - the rule that survives this change.
+  assert.equal(row.LanguageNames, null);
+  assert.equal(row.WorkCategory, null);
+  assert.equal(row.DocLink, null);
+});
+
+test('a credited member who is NOT the composer/lyricist never gets a stranger\'s name in their row', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  // The member matched the song overall (matched: true - e.g. as a backing vocalist somewhere in
+  // the credits), but their own name is not Sachin-Jigar or Amitabh Bhattacharya. Writing the full
+  // composer/lyricist list into THEIR row would put someone else's name in a legally meaningful
+  // column - see workLink.service.js.
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: {
+      ...spotifyTrack(),
+      composers: ['Sachin-Jigar'],
+      lyricists: ['Amitabh Bhattacharya'],
+    },
+    matched: true,
+    memberNames: ['Rana Mazumdar'],
+  });
+
+  assert.equal(row.Author_Composer, null);
+  assert.equal(row.Author_Lyricist, null);
+});
+
+test('a dropped middle name still earns the writer column, via the same rules as song matching', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: { ...spotifyTrack(), composers: ['A.R. Rahman'], lyricists: [] },
+    matched: true,
+    // "Allah Rakha Rahman" (the identity-document name) vs the credit's "A.R. Rahman" - the exact
+    // initial/dropped-middle-name case workMatch.service.js exists to forgive.
+    memberNames: ['Allah Rakha Rahman'],
+  });
+
+  assert.equal(row.Author_Composer, 'A.R. Rahman');
+});
+
+test('an empty credit list is stored as null, not an empty string', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: { ...spotifyTrack(), composers: [], lyricists: ['  '] },
+    matched: true,
+  });
+
+  assert.equal(row.Author_Composer, null);
+  assert.equal(row.Author_Lyricist, null);
+});
+
+test('a crowded writer credit is clipped to the column width', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const row = await workLinkService.saveWorkLink({
+    userId,
+    resolved: {
+      ...spotifyTrack(),
+      composers: Array.from({ length: 40 }, (_, i) => `Composer Number ${i}`),
+      lyricists: Array.from({ length: 40 }, (_, i) => `Lyricist Number ${i}`),
+    },
+    matched: true,
+    // The member has to be one of the credited writers for either column to be written at all.
+    memberNames: ['Composer Number 0', 'Lyricist Number 0'],
+  });
+
+  assert.ok(row.Author_Composer.length <= 100, `Author_Composer ${row.Author_Composer.length}`);
+  assert.ok(row.Author_Lyricist.length <= 100, `Author_Lyricist ${row.Author_Lyricist.length}`);
 });
 
 test('CreatedBy records whether the name check passed', async (t) => {
@@ -214,4 +350,37 @@ test('missing optional metadata is stored as null, not an empty string', async (
   assert.equal(row.ReleaseYear, null);
   assert.equal(row.Publisher, null);
   assert.equal(row.DigitalLink, 'https://www.youtube.com/watch?v=abc123');
+});
+
+// --- clearing on "Start over" -----------------------------------------------
+
+test('clearWorkLinks removes every song for that member', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(1), matched: true });
+  await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(2), matched: true });
+  assert.equal(await workLinkService.countWorkLinks(userId), 2);
+
+  await workLinkService.clearWorkLinks(userId);
+
+  assert.equal(await workLinkService.countWorkLinks(userId), 0);
+  // Not just uncounted - actually gone, so a fresh link after this starts a clean cap.
+  const row = await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(3), matched: true });
+  assert.ok(row, 'the cap was not left exhausted by the cleared rows');
+  assert.equal(await workLinkService.countWorkLinks(userId), 1, 'only the new link counts');
+});
+
+test('clearWorkLinks never touches another member', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userA = await makeAccount();
+  const userB = await makeAccount();
+
+  await workLinkService.saveWorkLink({ userId: userA, resolved: spotifyTrack(1), matched: true });
+  await workLinkService.saveWorkLink({ userId: userB, resolved: spotifyTrack(2), matched: true });
+
+  await workLinkService.clearWorkLinks(userA);
+
+  assert.equal(await workLinkService.countWorkLinks(userA), 0);
+  assert.equal(await workLinkService.countWorkLinks(userB), 1, "someone else's restart must not touch this");
 });

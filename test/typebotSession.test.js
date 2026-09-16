@@ -19,12 +19,14 @@
 // each file in its own process, so that stays contained here.
 // Run: npm test
 // ==================================================================
-import { test, beforeEach } from 'node:test';
+import { test, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { appError } from '../src/shared/errors.js';
 import { typebotClient, isDeadSessionError } from '../src/modules/conversation/services/typebot/typebotClient.js';
 import { typebotSessionStore } from '../src/modules/conversation/services/typebot/typebotSessionStore.js';
 import { handle, handleUpload } from '../src/modules/conversation/engines/registrationEngine.js';
+import { paymentService } from '../src/modules/payment/services/payment.service.js';
+import { prisma } from '../src/shared/prisma.js';
 
 // --- the real wire shapes --------------------------------------------------
 
@@ -76,6 +78,11 @@ test('unrelated failures are not dead sessions', () => {
 const USER = '999999';
 // A variableId no map knows, so no answer is persisted and the test needs no database.
 const LIVE_INPUT = { id: 'old-block', type: 'text input', options: { variableId: 'vunmappedxxxxxxxxxxxxxxxx' } };
+
+after(async () => {
+  await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: BigInt(USER) } }).catch(() => {});
+  await prisma.$disconnect().catch(() => {});
+});
 const FRESH_INPUT = { id: 'first-question', type: 'choice input', items: [{ id: 'i1', content: 'Yes' }] };
 
 let calls;
@@ -99,8 +106,12 @@ function stubClient({ continueChat }) {
 const texts = (res) =>
   (res.messages ?? []).map((m) => m.content?.richText?.[0]?.children?.[0]?.text ?? '').join(' || ');
 
-beforeEach(() => {
+beforeEach(async () => {
   typebotSessionStore.clear(USER);
+  // The engine journals every accepted answer, so the tests above leave turns behind for USER - and
+  // a journal makes an empty start call return the resume offer instead of starting a chat. Clear
+  // it so each test here starts from "no registration in progress", which is what they all assume.
+  await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: BigInt(USER) } }).catch(() => {});
 });
 
 test('an expired session restarts the chat instead of wedging', async () => {
@@ -170,6 +181,109 @@ test('a healthy turn is untouched', async () => {
   assert.equal(typebotSessionStore.get(USER).sessionId, 'live-session', 'the session id is kept');
 });
 
+// --- isPaymentStep: a stable signal for the frontend to call /payment/initiate -------------------
+
+test('a normal question is not flagged as the payment step', async () => {
+  stubClient({
+    continueChat: () => ({
+      messages: [],
+      input: { id: 'next-block', type: 'text input', options: {} },
+    }),
+  });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  const res = await handle({ userId: USER, token: 't', message: 'hello' });
+
+  assert.equal(res.isPaymentStep, false);
+});
+
+test('confirming the pre-payment review surfaces the real payment button flagged isPaymentStep', async () => {
+  // One of paymentGate.js's real, hardcoded PAYMENT_BLOCK_IDS - "Group #68, item 'payment'".
+  const PAYMENT_BLOCK = { id: 'mqd5zfukd99nkczylu206jo1', type: 'choice input', items: [{ id: 'x', content: 'payment' }] };
+  stubClient({ continueChat: () => { throw new Error('should not be called - the review-confirm branch is local'); } });
+  typebotSessionStore.set(USER, {
+    sessionId: 'live-session',
+    input: LIVE_INPUT,
+    pendingPaymentReview: { input: PAYMENT_BLOCK },
+  });
+
+  const res = await handle({ userId: USER, token: 't', message: 'Yes, everything is correct' });
+
+  assert.equal(res.input.id, PAYMENT_BLOCK.id);
+  assert.equal(res.isPaymentStep, true, 'this is the frontend\'s cue to call POST /payment/initiate instead of relaying the answer');
+});
+
+test('rejecting the pre-payment review still flags the payment button it hands back', async () => {
+  const PAYMENT_BLOCK = { id: 'tjbgzghma2th8et9srotmzt5', type: 'choice input', items: [{ id: 'x', content: 'Pay' }] };
+  stubClient({ continueChat: () => { throw new Error('should not be called'); } });
+  typebotSessionStore.set(USER, {
+    sessionId: 'live-session',
+    input: LIVE_INPUT,
+    pendingPaymentReview: { input: PAYMENT_BLOCK },
+  });
+
+  const res = await handle({ userId: USER, token: 't', message: 'something is wrong' });
+
+  assert.equal(res.input.id, PAYMENT_BLOCK.id);
+  assert.equal(res.isPaymentStep, true);
+});
+
+// --- the payment button is terminal: Typebot is never driven past it ----------------------------
+
+// Every payment block leads straight to Typebot's own "Thank you for your payment." and then the
+// flow ends. Relaying anything at all would play that message and end the session (wiping the
+// journal) for someone who had paid nothing - so continueChat must not be called at all here.
+const PARKED_BLOCK = {
+  id: 'mqd5zfukd99nkczylu206jo1',
+  type: 'choice input',
+  items: [{ id: 'x', content: 'Pay Application Fee' }],
+};
+
+function stubPaid(paid) {
+  const original = paymentService.hasSuccessfulPayment;
+  paymentService.hasSuccessfulPayment = async () => paid;
+  return () => { paymentService.hasSuccessfulPayment = original; };
+}
+
+test('typing at the payment button does not relay to Typebot when nothing has been paid', async () => {
+  stubClient({ continueChat: () => { throw new Error('continueChat must not be called at the payment button'); } });
+  const restore = stubPaid(false);
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: PARKED_BLOCK });
+
+  try {
+    const res = await handle({ userId: USER, token: 't', message: 'Pay' });
+
+    assert.equal(calls.continueChat.length, 0, 'Typebot must never see this as the button being answered');
+    assert.equal(res.sessionEnded, false, 'the session must not end - that is what used to clear the journal');
+    assert.equal(res.input.id, PARKED_BLOCK.id, 'the member stays parked on the same button');
+    assert.equal(res.isPaymentStep, true);
+    assert.match(texts(res), /haven't received your payment/i);
+    assert.doesNotMatch(texts(res), /thank you for your payment/i);
+  } finally {
+    restore();
+  }
+});
+
+test('typing at the payment button after paying points the member at support, still without relaying', async () => {
+  // Only reachable when complete() is still refusing - a completed registration routes to the Q&A
+  // engine instead, so this member has paid but something required is missing.
+  stubClient({ continueChat: () => { throw new Error('continueChat must not be called at the payment button'); } });
+  const restore = stubPaid(true);
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: PARKED_BLOCK });
+
+  try {
+    const res = await handle({ userId: USER, token: 't', message: 'done' });
+
+    assert.equal(calls.continueChat.length, 0);
+    assert.equal(res.sessionEnded, false);
+    assert.equal(res.input.id, PARKED_BLOCK.id);
+    assert.match(texts(res), /received your payment/i);
+    assert.match(texts(res), new RegExp(USER), 'the registration id support will ask for');
+  } finally {
+    restore();
+  }
+});
+
 // --- the upload path -------------------------------------------------------
 
 test('an expired session during upload clears it and hands back a usable question', async () => {
@@ -192,4 +306,41 @@ test('an expired session during upload clears it and hands back a usable questio
   assert.match(texts(res), /timed out/i);
   assert.match(texts(res), /wasn't attached/i, 'the member is told the file did not go through');
   assert.equal(typebotSessionStore.get(USER).sessionId, 'fresh-session');
+});
+
+// --- a blank message is a start call, not an answer -------------------------
+
+test('an empty-string message is treated as a start call, not an answer', async () => {
+  // Apidog and any client that always sends the field post `{"message": ""}`. The validator allows
+  // it, and every "is this a start call?" test compares against undefined - so without normalising,
+  // a returning member was sent to question 1 instead of being offered their registration back.
+  // Found live against account 386, which had 15 journalled turns waiting.
+  stubClient({ continueChat: () => ({ input: LIVE_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '' });
+
+  assert.equal(calls.continueChat.length, 0, 'a blank message is never relayed as an answer');
+  assert.equal(calls.startChat.length, 1, 'it starts a chat, exactly as an omitted message does');
+});
+
+test('a whitespace-only message is blank too', async () => {
+  stubClient({ continueChat: () => ({ input: LIVE_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '   \n ' });
+
+  assert.equal(calls.continueChat.length, 0);
+});
+
+test('a blank message alongside a file still sends the file', async () => {
+  // `text = message ?? (...)` - `??` keeps an empty string, so an upload arriving with
+  // `message: ""` used to relay "" instead of the URL, and Typebot rejected its own upload.
+  stubClient({ continueChat: () => ({ input: FRESH_INPUT, messages: [] }) });
+  typebotSessionStore.set(USER, { sessionId: 'live-session', input: LIVE_INPUT });
+
+  await handle({ userId: USER, token: 't', message: '', attachedFileUrls: ['https://s3/x.jpeg'] });
+
+  assert.equal(calls.continueChat.length, 1, 'a file IS an answer, so it is relayed');
+  assert.equal(calls.continueChat[0].message.text, 'https://s3/x.jpeg', 'the URL, not an empty string');
 });

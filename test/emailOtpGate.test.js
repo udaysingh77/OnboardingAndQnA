@@ -126,6 +126,8 @@ before(async () => {
 
 after(async () => {
   for (const id of createdAccountIds) {
+    // handle() journals every accepted answer now, so driving it here leaves rows behind.
+    await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: id } }).catch(() => {});
     await prisma.appAccounts.delete({ where: { AccountId: id } }).catch(() => {});
   }
   await prisma.$disconnect().catch(() => {});

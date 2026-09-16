@@ -26,4 +26,8 @@ function findByAccountId(accountId) {
   });
 }
 
-export const workRepository = { createWorkRegistration, countByAccountId, findByAccountId };
+function deleteByAccountId(accountId) {
+  return prisma.appAccountsWorkRegistration.deleteMany({ where: { AccountId: BigInt(accountId) } });
+}
+
+export const workRepository = { createWorkRegistration, countByAccountId, findByAccountId, deleteByAccountId };

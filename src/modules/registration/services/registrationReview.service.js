@@ -170,4 +170,18 @@ async function buildReview(userId) {
   return sections;
 }
 
-export const registrationReviewService = { buildReview, DOCUMENT_LABELS };
+// [{ title, lines }] -> plain text, one section per paragraph. Shared by the payment review
+// (paymentGate.js's describeReview) and the resume summary (registrationEngine.js) - both just want
+// "here is what's on file", worded differently around the same rendered body.
+export function renderSections(sections) {
+  return sections
+    .map(({ title, lines }) => {
+      const rendered = lines
+        .map(({ label, value }) => (label ? `  ${label}: ${value}` : `  - ${value}`))
+        .join('\n');
+      return `${title}\n${rendered}`;
+    })
+    .join('\n\n');
+}
+
+export const registrationReviewService = { buildReview, renderSections, DOCUMENT_LABELS };

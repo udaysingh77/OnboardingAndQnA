@@ -159,6 +159,29 @@ model AppAccountsAlias {
   @@map("App_Accounts_Alias")
 }
 
+/// Every answer Typebot ACCEPTED, in order, so an abandoned registration can be resumed instead of
+/// restarted. Created by scripts/add-chat-journal.sql, not `db push` - see that script for why the
+/// position cannot be restored any other way (Typebot's `startFrom` is silently ignored on the
+/// public endpoint, and 38 of the flow's 131 inputs have no variableId, so the branch a member took
+/// is not recoverable from App_Accounts columns).
+///
+/// `Answer` holds what was sent to TYPEBOT, not what the member typed - the gates transform answers
+/// before the relay, and journaling the relayed value is what keeps replay free of side effects.
+model AppAccountsChatJournal {
+  JournalId    BigInt   @id(map: "PK_App_Accounts_ChatJournal") @default(autoincrement())
+  AccountId    BigInt
+  TurnIndex    Int
+  BlockId      String   @db.NVarChar(50)
+  VariableId   String?  @db.NVarChar(50)
+  Answer       String?  @db.NVarChar(Max)
+  AttachedUrls String?  @db.NVarChar(Max)
+  CreateDate   DateTime @default(now(), map: "DF_App_Accounts_ChatJournal_CreateDate") @db.DateTime
+
+  @@unique([AccountId, TurnIndex], map: "UQ_App_Accounts_ChatJournal_AccountId_TurnIndex")
+  @@index([AccountId], map: "IX_App_Accounts_ChatJournal_AccountId")
+  @@map("App_Accounts_ChatJournal")
+}
+
 model AppAccountsDoc {
   AccountDocId     BigInt    @id(map: "PK_App_Accounts_Doc") @default(autoincrement())
   AccountId        BigInt?
@@ -471,3 +494,29 @@ model MemberRoleTypeLookUpFees {
   @@map("MemberRoleType_LookUp_Fees")
   @@ignore
 }
+
+/// Transaction records for onboarding membership fee payments via PayU.
+/// Created by scripts/add-payment-table.sql and hand-added here rather than via `db push`.
+model AppAccountsPayment {
+  PaymentId     BigInt   @id(map: "PK_App_Accounts_Payment") @default(autoincrement())
+  AccountId     BigInt
+  TxnId         String   @unique(map: "UQ_App_Accounts_Payment_TxnId") @db.NVarChar(100)
+  MihPayId      String?  @db.NVarChar(100)
+  Amount        Float
+  Currency      String   @default("INR", map: "DF_App_Accounts_Payment_Currency") @db.NVarChar(10)
+  Status        String   @default("PENDING", map: "DF_App_Accounts_Payment_Status") @db.NVarChar(50)
+  PaymentMode   String?  @db.NVarChar(50)
+  BankRefNo     String?  @db.NVarChar(100)
+  ProductInfo   String?  @db.NVarChar(255)
+  CustomerName  String?  @db.NVarChar(100)
+  CustomerEmail String?  @db.NVarChar(100)
+  CustomerPhone String?  @db.NVarChar(50)
+  PayuResponse  String?  @db.NVarChar(Max)
+  ErrorMessage  String?  @db.NVarChar(500)
+  CreateDate    DateTime @default(now(), map: "DF_App_Accounts_Payment_CreateDate") @db.DateTime
+  ModifedDate   DateTime @default(now(), map: "DF_App_Accounts_Payment_ModifedDate") @db.DateTime
+
+  @@index([AccountId], map: "IX_App_Accounts_Payment_AccountId")
+  @@map("App_Accounts_Payment")
+}
+

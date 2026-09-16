@@ -1,4 +1,4 @@
-﻿// ==================================================================
+// ==================================================================
 // IPRS Platform Backend - Week 1 (Onboarding & Platform Foundation)
 // Environment configuration loader (validated with Zod)
 // ==================================================================
@@ -45,6 +45,10 @@ const envSchema = z.object({
     .transform((v) => v === 'true'),
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
+  // The envelope sender. Kept separate from SMTP_USER because relays like ZeptoMail
+  // authenticate with a fixed literal username ("emailapikey"), which is not an address -
+  // falling back to SMTP_USER there would put a non-address in the From header.
+  SMTP_FROM: z.string().optional(),
 
   // Shown at the pre-payment review when the member says something needs correcting. Optional:
   // blank falls back to "our team will get in touch" rather than printing an empty contact line.
@@ -53,8 +57,22 @@ const envSchema = z.object({
   SPOTIFY_CLIENT_ID: z.string().optional(),
   SPOTIFY_CLIENT_SECRET: z.string().optional(),
 
-  // Work links (the songs a member claims). YouTube metadata comes from the keyless oEmbed
-  // endpoint - there is no YouTube Data API key for this project, see work/services/youtube.service.js.
+  // Work links (the songs a member claims). Role-labelled credits come from the in-house
+  // credits service (see work/services/musicCredits.service.js); the oEmbed + Gemini pair below
+  // is the fallback for when it can't answer.
+  MUSIC_CREDITS_API_BASE_URL: z.string().default('https://spotify.choira.in'),
+  // Pathfinder + InnerTube + Gemini happen behind this one call, so it is slower than a plain
+  // metadata fetch - a YouTube resolve measured ~10-20s.
+  MUSIC_CREDITS_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  // Kill-switch: false skips the credits service entirely and uses the oEmbed/Gemini + Spotify
+  // Web API path alone. Same shape as OCR_ENABLED - z.coerce.boolean() would treat "false" as true.
+  MUSIC_CREDITS_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
+
+  // YouTube metadata comes from the keyless oEmbed endpoint - there is no YouTube Data API key
+  // for this project, see work/services/youtube.service.js.
   YOUTUBE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   // Gemini splits a YouTube title into song/artists/album. Optional: leave GEMINI_API_KEY blank and
   // the flow falls back to the raw video title instead of breaking.
@@ -88,6 +106,25 @@ const envSchema = z.object({
   TYPEBOT_API_TOKEN: z.string().optional(),
   TYPEBOT_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
   MAX_UPLOAD_SIZE_MB: z.coerce.number().int().positive().default(10),
+
+  /* PayU Payment Gateway */
+  PAYU_KEY: z.string().optional().default('test_key'),
+  PAYU_SALT: z.string().optional().default('test_salt'),
+  PAYU_BASE_URL: z.string().default('https://test.payu.in'),
+  PAYU_WEBSERVICE_URL: z.string().default('https://test.payu.in/merchant/postservice.php?form=2'),
+  // No PAYU_DEFAULT_AMOUNT: the fee is never configurable or client-supplied. It is resolved
+  // server-side from the member's own role answer (RollTypeIds) via payu/feeSchedule.js, and
+  // initiatePayment() refuses to start a payment it cannot price rather than falling back.
+  // Where PayU itself POSTs the payment result back to (surl/furl sent in the initiate request) -
+  // must be OUR OWN publicly reachable /payment/callback endpoint, not a page PayU or the frontend
+  // owns. Optional so an unconfigured deploy falls back to PAYU_SUCCESS_URL/FAILURE_URL below
+  // (payment.service.js's old behaviour) rather than failing outright.
+  PAYU_CALLBACK_URL: z.string().optional(),
+  // Where the member's BROWSER ends up after our /payment/callback has processed PayU's postback -
+  // a frontend page, not PayU's own. payment.controller.js redirects here with ?txnid&status.
+  PAYU_SUCCESS_URL: z.string().optional(),
+  PAYU_FAILURE_URL: z.string().optional(),
+  PAYU_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
 });
 
 const parsed = envSchema.safeParse(process.env);
