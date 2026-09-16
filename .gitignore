@@ -4,9 +4,9 @@ node_modules/
 .pnp.js
 
 # Environment
-.env
-.env.local
-.env.*.local
+# Every env variant is secret - only the committed template is tracked.
+.env*
+!.env.example
 
 # Build output
 dist/
@@ -32,3 +32,7 @@ Thumbs.db
 # Temp
 coverage/
 .tmp/
+# stray local backups - never commit (they usually contain secrets)
+*.bak
+*.bak.*
+.env.bak*
