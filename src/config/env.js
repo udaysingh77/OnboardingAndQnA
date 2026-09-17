@@ -45,6 +45,10 @@ const envSchema = z.object({
     .transform((v) => v === 'true'),
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
+  // The envelope sender. Kept separate from SMTP_USER because relays like ZeptoMail
+  // authenticate with a fixed literal username ("emailapikey"), which is not an address -
+  // falling back to SMTP_USER there would put a non-address in the From header.
+  SMTP_FROM: z.string().optional(),
 
   // Shown at the pre-payment review when the member says something needs correcting. Optional:
   // blank falls back to "our team will get in touch" rather than printing an empty contact line.
