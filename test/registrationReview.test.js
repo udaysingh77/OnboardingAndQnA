@@ -114,6 +114,7 @@ test('filled fields appear, under the section a member would look in', async (t)
     AccountAlias: 'Arijit',
     AccountEmail: 'member@example.invalid',
     RollTypeIds: 'Composer',
+    ApplicantPath: '(Individual) Author / Composer',
     BankName: 'State Bank of India',
     BankAcNo: '1234567890',
     BankIFSCCode: 'SBIN0001234',
@@ -128,7 +129,8 @@ test('filled fields appear, under the section a member would look in', async (t)
 
   const body = flatten(sections);
   assert.match(body, /Name\|Arijit Singh/);
-  assert.match(body, /Applying as\|Composer/);
+  assert.match(body, /Applying as\|\(Individual\) Author \/ Composer/);
+  assert.match(body, /Role\|Composer/);
   // Shown in full on purpose - masking the account number would hide the most expensive OCR error.
   assert.match(body, /Account number\|1234567890/);
   assert.match(body, /PAN\|ABCDE1234F/);

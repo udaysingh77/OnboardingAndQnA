@@ -73,6 +73,9 @@ model AppAccounts {
   RollTypeIds                String?   @db.NVarChar(50)
   RecordStatus               Int?      @default(0, map: "DF_AccountMaster_AccountStatus") @db.TinyInt
   EntityType                 String?   @db.NVarChar(50)
+  // Which of the 4 fee-determining paths ("(Individual) Author / Composer", "(NRI) Author /
+  // Composer", "Owner/Publisher", "(NRI) Owner/Publisher") - see scripts/add-applicant-path-column.sql
+  ApplicantPath               String?   @db.NVarChar(50)
   ApplicationStatus          Int?      @db.TinyInt
   OverseasSocietyName        String?   @db.NVarChar(150)
   AssociationName_India      String?   @db.NVarChar(150)

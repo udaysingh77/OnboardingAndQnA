@@ -38,7 +38,8 @@ const SECTIONS = [
   {
     title: 'Membership',
     fields: [
-      ['RollTypeIds', 'Applying as'],
+      ['ApplicantPath', 'Applying as'],
+      ['RollTypeIds', 'Role'],
       ['EntityType', 'Entity type'],
       ['TeritoryAppFor', 'Territory'],
       ['GSTNo', 'GST number'],
