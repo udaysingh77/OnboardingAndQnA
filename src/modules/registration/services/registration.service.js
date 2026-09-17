@@ -139,6 +139,7 @@ const CONVERSATION_FIELDS = [
   'AccountEmail',
   'PlaceOfBirth',
   'RollTypeIds',
+  'ApplicantPath',
   'TeritoryAppFor',
   'Nationality',
   'AssociationName_India',

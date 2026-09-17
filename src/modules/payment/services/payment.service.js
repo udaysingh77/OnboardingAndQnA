@@ -51,9 +51,9 @@ function toPublic(payment) {
 
 /**
  * Initiates a new PayU payment transaction for the member. The amount is never taken from the
- * caller - it's resolved server-side from the member's own role answer (RollTypeIds), already
- * saved during the Typebot conversation, via feeSchedule.js. This is what stops a member paying
- * whatever they like instead of their actual membership fee.
+ * caller - it's resolved server-side from the member's own applicant-path answer (ApplicantPath),
+ * already saved during the Typebot conversation, via feeSchedule.js. This is what stops a member
+ * paying whatever they like instead of their actual membership fee.
  */
 async function initiatePayment({ userId, productInfo }) {
   const account = await userRepository.findById(userId);
@@ -61,14 +61,14 @@ async function initiatePayment({ userId, productInfo }) {
     throw notFoundError('User not found');
   }
 
-  const numAmount = resolveFee(account.RollTypeIds);
+  const numAmount = resolveFee(account.ApplicantPath);
   if (numAmount == null) {
-    // Either the member hasn't reached the role-choice question yet, or the flow's role-choice
-    // wording changed and feeSchedule.js's keys are stale - either way, guessing a fee here would
-    // be worse than refusing to start a payment for it.
-    throw badRequestError('Registration incomplete: role not yet determined, cannot compute fee', {
+    // Either the member hasn't reached the applicant-path question yet, or the flow's wording
+    // changed and feeSchedule.js's keys are stale - either way, guessing a fee here would be worse
+    // than refusing to start a payment for it.
+    throw badRequestError('Registration incomplete: applicant path not yet determined, cannot compute fee', {
       errorCode: 'REGISTRATION_INCOMPLETE',
-      details: { rollTypeIds: account.RollTypeIds ?? null },
+      details: { applicantPath: account.ApplicantPath ?? null },
     });
   }
 

@@ -14,6 +14,13 @@ export const ACCOUNT_FIELD_BY_VARIABLE_ID = {
   virpfcnue17syf7ua2hbuj5d1: 'AccountEmail', // email input
   vy80zc5eoveac6euqlurki58o: 'PlaceOfBirth', // place of birth
   vcf06ka3xjtg0u940pk0qd7os: 'RollTypeIds', // role: lyricist / composer / both
+  // The 4-way "(Individual) Author / Composer" / "(NRI) Author / Composer" / "Owner/Publisher" /
+  // "(NRI) Owner/Publisher" fork (Group #3). Originally had NO variable assigned - a pure
+  // navigation choice, same failure mode Territory hit before it got one (see below) - so the
+  // answer was never persisted and payu/feeSchedule.js's lookup against RollTypeIds (which
+  // actually holds the Lyricist/Composer/Both answer above, a different question) always missed.
+  // Fixed the same way Territory was: assigned this variable in Studio and republished.
+  vjxwoc559admtu01nvecsfrbe: 'ApplicantPath',
   // territory applied for (INDIA/WORLD) - variableId changed when the new "all flow fanished"
   // typebot was published (was vufrpq6qr5rpcbewbffajjb73 in the old, individual-only flow).
   vn91tusicqaolw34d4zq2id33: 'TeritoryAppFor',

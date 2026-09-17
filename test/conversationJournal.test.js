@@ -314,7 +314,12 @@ test('resuming shows a summary of what was already told, read from the database'
   // buildReview() reads them straight from App_Accounts, not from anything journalled.
   await prisma.appAccounts.update({
     where: { AccountId: BigInt(userId) },
-    data: { AccountEmail: 'resume-test@example.com', PlaceOfBirth: 'Banaras', RollTypeIds: 'Both' },
+    data: {
+      AccountEmail: 'resume-test@example.com',
+      PlaceOfBirth: 'Banaras',
+      RollTypeIds: 'Both',
+      ApplicantPath: '(Individual) Author / Composer',
+    },
   });
 
   for (const blockId of ['b1', 'b2', 'b3']) {
@@ -332,7 +337,8 @@ test('resuming shows a summary of what was already told, read from the database'
   assert.match(texts(resumed), /Here's what you told us earlier/);
   assert.match(texts(resumed), /Email: resume-test@example\.com/);
   assert.match(texts(resumed), /Place of birth: Banaras/);
-  assert.match(texts(resumed), /Applying as: Both/);
+  assert.match(texts(resumed), /Applying as: \(Individual\) Author \/ Composer/);
+  assert.match(texts(resumed), /Role: Both/);
   assert.match(texts(resumed), /Picking up where you left off/, "Typebot's own next question still follows");
   assert.equal(resumed.input?.id, 'b4');
 });

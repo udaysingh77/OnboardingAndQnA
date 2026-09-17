@@ -9,7 +9,7 @@ import {
 } from '../src/modules/payment/services/payu/payu.utils.js';
 import { resolveFee, FEES_BY_ROLL_TYPE } from '../src/modules/payment/services/payu/feeSchedule.js';
 
-async function makeAccount({ rollTypeIds, email, name = 'PayU Tester' } = {}) {
+async function makeAccount({ applicantPath, email, name = 'PayU Tester' } = {}) {
   const { prisma } = await import('../src/shared/prisma.js');
   const account = await prisma.appAccounts.create({
     data: {
@@ -17,7 +17,7 @@ async function makeAccount({ rollTypeIds, email, name = 'PayU Tester' } = {}) {
       AccountMobile: `9${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 10)}`,
       AccountEmail: email,
       AccountName: name,
-      RollTypeIds: rollTypeIds,
+      ApplicantPath: applicantPath,
     },
   });
   return String(account.AccountId);
@@ -262,9 +262,9 @@ test('verifyPayuHash rejects tampered amount, status, or hash', () => {
   assert.equal(verifyPayuHash({}, null), false);
 });
 
-test('resolveFee returns the right fee for each role path', () => {
-  for (const [rollTypeIds, fee] of Object.entries(FEES_BY_ROLL_TYPE)) {
-    assert.equal(resolveFee(rollTypeIds), fee);
+test('resolveFee returns the right fee for each applicant path', () => {
+  for (const [applicantPath, fee] of Object.entries(FEES_BY_ROLL_TYPE)) {
+    assert.equal(resolveFee(applicantPath), fee);
   }
 });
 
@@ -340,13 +340,13 @@ test('End-to-end dummy payment flow with PayU test credentials', async () => {
   const { env } = await import('../src/config/env.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const rollTypeIds = '(Individual) Author / Composer';
-  const expectedFee = FEES_BY_ROLL_TYPE[rollTypeIds]; // 1200
+  const applicantPath = '(Individual) Author / Composer';
+  const expectedFee = FEES_BY_ROLL_TYPE[applicantPath]; // 1200
   const expectedAmount = formatAmount(expectedFee);
   const accountName = 'PayU Tester';
   const accountEmail = `payu.e2e.${Date.now()}@example.com`;
 
-  const userId = await makeAccount({ rollTypeIds, email: accountEmail, name: accountName });
+  const userId = await makeAccount({ applicantPath, email: accountEmail, name: accountName });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -355,7 +355,7 @@ test('End-to-end dummy payment flow with PayU test credentials', async () => {
 
   try {
     // 1. Initiate payment - no amount is sent by the client; it comes entirely from the account's
-    // own role (RollTypeIds), via feeSchedule.js.
+    // own applicant-path answer (ApplicantPath), via feeSchedule.js.
     const initRes = await fetch(`${baseUrl}/payment/initiate`, {
       method: 'POST',
       headers: {
@@ -481,9 +481,9 @@ test('a client-supplied amount is ignored - the fee always comes from the role o
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const rollTypeIds = '(NRI) Owner/Publisher';
-  const expectedAmount = formatAmount(FEES_BY_ROLL_TYPE[rollTypeIds]); // 3700.00
-  const userId = await makeAccount({ rollTypeIds, email: `payu.override.${Date.now()}@example.com` });
+  const applicantPath = '(NRI) Owner/Publisher';
+  const expectedAmount = formatAmount(FEES_BY_ROLL_TYPE[applicantPath]); // 3700.00
+  const userId = await makeAccount({ applicantPath, email: `payu.override.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -510,7 +510,7 @@ test('initiate refuses to start a payment before the role question has been answ
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const userId = await makeAccount({ rollTypeIds: null, email: `payu.norole.${Date.now()}@example.com` });
+  const userId = await makeAccount({ applicantPath: null, email: `payu.norole.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -618,8 +618,8 @@ test('initiate refuses a second payment once one has succeeded', async () => {
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const rollTypeIds = '(Individual) Author / Composer';
-  const userId = await makeAccount({ rollTypeIds, email: `payu.dupe.${Date.now()}@example.com` });
+  const applicantPath = '(Individual) Author / Composer';
+  const userId = await makeAccount({ applicantPath, email: `payu.dupe.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -661,11 +661,11 @@ test('a successful callback clears the Typebot session and journal once the regi
   const { signAccessToken } = await import('../src/utils/token.js');
   const { typebotSessionStore } = await import('../src/modules/conversation/services/typebot/typebotSessionStore.js');
 
-  const rollTypeIds = '(Individual) Author / Composer';
+  const applicantPath = '(Individual) Author / Composer';
   const productinfo = 'IPRS Test Membership Fee';
   const accountName = 'PayU Tester';
   const accountEmail = `payu.cleanup.${Date.now()}@example.com`;
-  const userId = await makeAccount({ rollTypeIds, email: accountEmail, name: accountName });
+  const userId = await makeAccount({ applicantPath, email: accountEmail, name: accountName });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
