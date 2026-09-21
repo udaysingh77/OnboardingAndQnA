@@ -174,12 +174,15 @@ Schemas are objects shaped `{ body?, query?, params? }`. Always call `.parse`; Z
   Field names mirror the DB columns (PascalCase, e.g. `AccountName`, `AccountMobile_Alt`) — verify with
   `npx prisma db pull` rather than hand-writing. `@db.Money` columns are typed `Float`, not `Decimal`.
 - No migrations are used: the schema is imported from the production dump (`scripts/mra_cleaned.sql`), so
-  there is no `prisma/migrations/` folder. For an additive schema change (e.g. the `PANNo` column,
-  added for OCR), use `npx prisma db push` after editing `schema.prisma` — `prisma:migrate` (`prisma
-  migrate dev`) fails here because it needs shadow-database `CREATE DATABASE` permission the
-  `iprs_app` DB user doesn't have. This still isn't a green light to add columns freely — the
-  `PANNo` addition (see "Typebot Registration Flow" below) only happened after confirming no
-  existing column could hold it; treat any further schema change the same way: stop, check whether
+  there is no `prisma/migrations/` folder. For an additive schema change, use `npx prisma db push`
+  after editing `schema.prisma` — or better, a plain idempotent SQL script like
+  `scripts/add-chat-journal.sql`, which is what IPRS's DBA can actually run against production.
+  `prisma:migrate` (`prisma migrate dev`) fails here
+  because it needs shadow-database `CREATE DATABASE` permission the `iprs_app` DB user doesn't have.
+  This still isn't a green light to add columns freely — every column this app adds is one IPRS has
+  to add to their real production database too, so PAN/GST deliberately went into the existing
+  generic `Detail2`/`Detail1` columns rather than new ones; treat any further schema change the same
+  way: stop, check whether
   an existing column genuinely can't work, and say so explicitly before editing `schema.prisma`.
 - Use the shared singleton from `shared/prisma.js` in repositories. It exposes `pingDatabase()`
   (a `SELECT 1` probe) used by `server.js` at boot and by the health service.
@@ -251,8 +254,8 @@ real column/mapping is confirmed.
 **GST number, stage name/alias, email, place of birth, role (lyricist/composer/both), territory
 applied for (INDIA/WORLD)**, plus a wide set of NRI and Owner/Publisher fields, *are* persisted
 (via `conversationFieldMap.js` + `registrationService.saveConversationField()`, see "Conversation
-Router" below) — `GSTNo` (new column, added the same way `PANNo` was), `Detail1` (duplicate GST
-write), and the existing `AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor`
+Router" below) — `Detail1` (the GST number), and the existing
+`AccountAlias`/`AccountEmail`/`PlaceOfBirth`/`RollTypeIds`/`TeritoryAppFor`
 columns, plus `Nationality`/`DualNationality`/`AssociationName_India`/`ChanlDesc`/`KindAttention1`/
 `EntityType` and the `AccountAddress`/`AccountAddress_PR` manual "type your address" entries on the
 NRI/company paths. Territory initially had no `options.variableId` set in Studio at all (Typebot
@@ -275,7 +278,7 @@ entry must be verified against `options.variableId` specifically** (fetch the li
 via the builder API and check the block's `options.variableId`, not its `id` or any other field) —
 a block id and a variableId can look superficially similar and this exact mixup is easy to repeat.
 
-**DOB, Gender, and Nationality from OCR** are also now persisted, alongside `PANNo`/bank fields/address
+**DOB, Gender, and Nationality from OCR** are also now persisted, alongside the PAN/bank fields/address
 in `runOcrAndPersist()`: `DOB` (from whichever doc type's OCR happens to include `extracted.dob` -
 PAN or Passport - parsed from the API's `DD/MM/YYYY` string format via a small `parseOcrDate()`
 helper, since `Date`'s constructor assumes `MM/DD/YYYY`), `Gender` (from Aadhaar/Voter ID's
@@ -307,9 +310,12 @@ Current) was user-confirmed, not derived from any column comment — the columns
 outside this app are otherwise unverified, same caveat as `Detail1`-`Detail12` below.
 
 **Confirmed `Detail1`/`Detail2`/`Detail10` mapping** (user-provided, unlike the rest of
-`Detail1`–`Detail12` which stay unmapped): `Detail1` gets a duplicate write of the GST number
-(alongside `GSTNo`, in `saveConversationField()`) and `Detail2` gets a duplicate write of the OCR'd
-PAN (alongside `PANNo`, in `runOcrAndPersist()`) — both additive, not replacing the named columns.
+`Detail1`–`Detail12` which stay unmapped): `Detail1` holds the GST number (written by
+`saveConversationField()`) and `Detail2` holds the OCR'd PAN (written by `runOcrAndPersist()`).
+These are the *only* place those two values live - this app used to add its own `GSTNo`/`PANNo`
+columns and dual-write both, but those were dropped so IPRS has two fewer columns to add to their
+real production schema (`Detail1`/`Detail2` already exist there, and are wider than the dropped
+columns were).
 `Detail10` is set to the literal string `'choira'` by `registrationRepository.markCompleted()`, once,
 the first time `ApplicationStatus` flips to 1 — a marker for other `Dreamsoft_UAT` consumers that
 this registration came through the Choira onboarding flow. `Detail3`–`Detail9`, `Detail11`,
@@ -370,10 +376,10 @@ Env: `OCR_PROVIDER`, `OCR_API_BASE_URL` (default `https://ocr.choira.io`),
 `OCR_REQUEST_TIMEOUT_MS`.
 
 What gets persisted to `AppAccounts` from a successful OCR result, and what doesn't:
-- **PAN**: the extracted number is written to `AppAccounts.PANNo` (`NVarChar(10)`) — added via
-  `db push` for this feature. No other PAN-shaped column existed: the only `PanNo` field
-  anywhere in the schema is on `AppAccountsTemp`, which is `@@ignore`'d by Prisma (no usable
-  primary key) and isn't the table this app writes to.
+- **PAN**: the extracted number is written to `AppAccounts.Detail2` (`NVarChar(100)`), a generic
+  column IPRS's real schema already has. No PAN-shaped column exists on this table: the only
+  `PanNo` field anywhere in the schema is on `AppAccountsTemp`, which is `@@ignore`'d by Prisma
+  (no usable primary key) and isn't the table this app writes to.
 - **Aadhaar**: extracted number/name/dob/gender/address are used only to compute `verified` —
   never written to `AppAccounts`. Same reasoning as the role/tax-residency/etc. fields above: no
   safe existing column, and this one wasn't worth a schema change. **Aadhaar as its own upload
@@ -391,13 +397,24 @@ What gets persisted to `AppAccounts` from a successful OCR result, and what does
 The document upload response includes `verified` (boolean) and `extracted` (raw OCR data) when
 OCR was attempted for that doc type; both are absent for NOC/COMPANY_DOC/PROFILE_PHOTO.
 
-Schema note: since the initial `db pull` import the schema has gained `PANNo` and `GSTNo` (applied
-via `npx prisma db push`, not `migrate dev` — the `iprs_app` DB user lacks the `CREATE DATABASE`
-permission `migrate dev`'s shadow database needs), `EntityType` was widened `NVarChar(10)`→`NVarChar(50)`,
-and three tables were added: `Email_Verification_Otp` (db push) and `App_Accounts_ChatJournal` +
-`App_Accounts_Alias` (created by `scripts/add-chat-journal.sql`/`add-alias-table.sql`, model added
-to `schema.prisma` by hand — see "Resuming an abandoned registration"). There is still no
-`prisma/migrations/` folder; the live schema and `schema.prisma` are kept in sync by whichever of
+Schema note: **this app adds no columns at all** to `App_Accounts` any more - every answer goes
+into a column IPRS's real production schema already has, as the code their own system uses
+(`AccountRegType` = I/NI/C/NC, `EntityType` = CP/PR/SP, `RollTypeIds` = MemberRoleType_LookUp ids,
+`Detail1` = GST, `Detail2` = PAN; see `memberRoleCodes.js`). `ApplicantPath`/`EntityTypeDetail`,
+added earlier when those code meanings weren't yet known, have been dropped -
+`scripts/add-applicant-path-column.sql`/`add-entity-type-detail-column.sql` are marked superseded
+and must not be run. `AccountPassword` and `EntityType` were also narrowed back to match prod
+exactly (`NVarChar(100)`/`NVarChar(10)`, confirmed against `mraai_uat`). Two
+tables were added: `App_Accounts_ChatJournal` + `App_Accounts_Alias` (created by
+`scripts/add-chat-journal.sql`/`add-alias-table.sql`, models added to `schema.prisma` by hand — see
+"Resuming an abandoned registration"). Payments write to `App_Accounts_RegPayment` — IPRS's own
+real registration-payment table (confirmed to already exist and be actively used in production,
+see `scripts/add-regpayment-table.sql`), not a table this app invented for itself (an earlier
+`App_Accounts_Payment` table/script is superseded). Email OTP verification state is **not** in the
+database at all — `modules/auth/services/emailOtpStore.js` holds it in memory (same pattern as
+`tokenBlacklist.js`), since IPRS's real database has no OTP-verification concept for email
+anywhere to mirror. There is still no `prisma/migrations/` folder; the live schema and
+`schema.prisma` are kept in sync by whichever of
 those two paths a change needs.
 
 ## Conversation Router
@@ -513,7 +530,7 @@ document from each `REQUIRED_DOC_GROUPS` group (see "Typebot Registration Flow" 
   - `handleUpload({ userId, token, file })` — gets a presigned URL from Typebot for the *current*
     file-input step, uploads the buffer, and — this is the key simplification versus the original
     wiring guide — **saves the document itself** by calling the existing
-    `registrationService.saveDocument()` directly (same OCR + `PANNo`/bank-column persistence
+    `registrationService.saveDocument()` directly (same OCR + PAN/bank-column persistence
     built for the Studio-HTTP-block model, just invoked from here instead). Because of this,
     Typebot's Studio no longer needs its own HTTP Request blocks for documents at all. File names
     are sanitised first (`safeFileName`) — Typebot drops the raw name into the presigned URL and
@@ -827,10 +844,12 @@ sub-conversation, tracked via a new `pendingEmailVerification: { email }` field 
   just answered the email question correctly, so the normal relay/persist path
   (`resolveConversationField` → `AccountEmail`) runs unchanged.
 
-**Setup**: `Email_Verification_Otp` needed an explicit `npx prisma db push` (+ `prisma generate`) —
-it wasn't created by the `email` branch merge alone. `SMTP_USER`/`SMTP_PASSWORD` are optional in
-`envSchema` with no default; without them, `sendVerificationOtp()` fails with `'Failed to send
-email'` and the real email question re-asks — fill them in `.env` for actual delivery.
+**Setup**: nothing DB-side to set up - OTP state lives in memory (`emailOtpStore.js`), not a table
+(IPRS's real database has no equivalent to mirror, so this sidesteps that rather than working
+around it - a server restart just clears any pending OTP, the member requests a new one).
+`SMTP_USER`/`SMTP_PASSWORD` are optional in `envSchema` with no default; without them,
+`sendVerificationOtp()` fails with `'Failed to send email'` and the real email question re-asks —
+fill them in `.env` for actual delivery.
 
 ## Conventions to preserve
 

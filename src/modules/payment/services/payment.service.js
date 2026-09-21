@@ -1,6 +1,16 @@
 // ==================================================================
 // Payment service - PayU checkout orchestration, hash computation,
 // callback processing, and status reconciliation.
+//
+// Writes to App_Accounts_RegPayment, IPRS's real registration-payment table (see
+// prisma/schema.prisma's AppAccountsRegPayment doc comment) - not a table this app invented for
+// itself. PaymentStatus semantics, confirmed by IPRS's own team (not guessed):
+//   0 = success, 1 = not-yet-confirmed (covers both "still pending" and "failed" - IPRS's own
+//   system does not distinguish them at the DB level either).
+// A row is created the moment a payment is initiated, at PaymentStatus 1. IPRS runs a scheduler
+// every ~3 hours that re-checks every row still at 1 against the gateway and flips it to 0 on
+// success - so this app must leave a row at 1 for a failed/unconfirmed attempt, never delete it
+// or represent "not yet paid" as a missing row.
 // ==================================================================
 import crypto from 'node:crypto';
 import { env } from '../../../config/env.js';
@@ -15,6 +25,9 @@ import { formatAmount, generatePayuHash, verifyPayuHash } from './payu/payu.util
 import { payuClient } from './payu/payu.client.js';
 import { resolveFee } from './payu/feeSchedule.js';
 
+// The shape this service's callers see. PENDING/FAILED are both stored as PaymentStatus 1 (see
+// the module doc comment) - the distinction between them is made live, only in what's returned
+// here, never persisted differently.
 export const PAYMENT_STATUS = Object.freeze({
   PENDING: 'PENDING',
   SUCCESS: 'SUCCESS',
@@ -22,28 +35,30 @@ export const PAYMENT_STATUS = Object.freeze({
   CANCELLED: 'CANCELLED',
 });
 
+// Confirmed by IPRS's team, not guessed.
+const REG_PAYMENT_STATUS_CODE = Object.freeze({ SUCCESS: 0, UNCONFIRMED: 1 });
+
 function generateTxnId(userId) {
   const randomSuffix = crypto.randomBytes(4).toString('hex');
   return `IPRS_${userId}_${Date.now()}_${randomSuffix}`;
 }
 
+// Default mapping for a row read on its own, with no live gateway check behind it (e.g.
+// getPaymentHistory). PaymentStatus 1 defaults to PENDING rather than FAILED - the row alone
+// can't tell a freshly-initiated attempt from one PayU already told us failed, and reporting
+// "failed" for one that's actually still processing is the worse mistake to make by default.
 function toPublic(payment) {
   if (!payment) return null;
+  const status =
+    payment.PaymentStatus === REG_PAYMENT_STATUS_CODE.SUCCESS ? PAYMENT_STATUS.SUCCESS : PAYMENT_STATUS.PENDING;
   return {
-    paymentId: String(payment.PaymentId),
+    paymentId: String(payment.PaymentRecieptId),
     userId: String(payment.AccountId),
-    txnId: payment.TxnId,
-    mihPayId: payment.MihPayId ?? null,
-    amount: payment.Amount,
-    currency: payment.Currency,
-    status: payment.Status,
-    paymentMode: payment.PaymentMode ?? null,
-    bankRefNo: payment.BankRefNo ?? null,
-    productInfo: payment.ProductInfo ?? null,
-    customerName: payment.CustomerName ?? null,
-    customerEmail: payment.CustomerEmail ?? null,
-    customerPhone: payment.CustomerPhone ?? null,
-    errorMessage: payment.ErrorMessage ?? null,
+    txnId: payment.TransactionNo,
+    mihPayId: payment.ResponseNo ?? null,
+    amount: payment.PaymentAmount,
+    status,
+    errorMessage: null,
     createdAt: payment.CreateDate,
     updatedAt: payment.ModifedDate,
   };
@@ -51,7 +66,7 @@ function toPublic(payment) {
 
 /**
  * Initiates a new PayU payment transaction for the member. The amount is never taken from the
- * caller - it's resolved server-side from the member's own applicant-path answer (ApplicantPath),
+ * caller - it's resolved server-side from the member's own registration type (AccountRegType),
  * already saved during the Typebot conversation, via feeSchedule.js. This is what stops a member
  * paying whatever they like instead of their actual membership fee.
  */
@@ -61,21 +76,21 @@ async function initiatePayment({ userId, productInfo }) {
     throw notFoundError('User not found');
   }
 
-  const numAmount = resolveFee(account.ApplicantPath);
+  const numAmount = resolveFee(account.AccountRegType);
   if (numAmount == null) {
-    // Either the member hasn't reached the applicant-path question yet, or the flow's wording
-    // changed and feeSchedule.js's keys are stale - either way, guessing a fee here would be worse
-    // than refusing to start a payment for it.
-    throw badRequestError('Registration incomplete: applicant path not yet determined, cannot compute fee', {
+    // Either the member hasn't reached the opening path question yet, or the flow's wording
+    // changed and memberRoleCodes.js's mapping is stale - either way, guessing a fee here would be
+    // worse than refusing to start a payment for it.
+    throw badRequestError('Registration incomplete: registration type not yet determined, cannot compute fee', {
       errorCode: 'REGISTRATION_INCOMPLETE',
-      details: { applicantPath: account.ApplicantPath ?? null },
+      details: { accountRegType: account.AccountRegType ?? null },
     });
   }
 
   // The payment button is a terminal state in our flow, but nothing stops a stale chat tab (or a
   // back button) from firing this a second time - and every call mints a fresh PayU checkout the
-  // member could actually go through with. Only a SUCCESS blocks: a PENDING row is what an
-  // abandoned PayU page leaves behind, and locking those members out of retrying would be worse.
+  // member could actually go through with. Only a real SUCCESS blocks: an abandoned/unconfirmed
+  // attempt stays at PaymentStatus 1, and locking those members out of retrying would be worse.
   if (await paymentRepository.hasSuccessfulPayment(userId)) {
     throw conflictError('This registration has already been paid for', {
       errorCode: 'PAYMENT_ALREADY_COMPLETED',
@@ -101,16 +116,19 @@ async function initiatePayment({ userId, productInfo }) {
     salt: env.PAYU_SALT,
   });
 
-  const paymentRecord = await paymentRepository.createPayment({
+  // Row exists from the moment of initiation, at PaymentStatus 1 - this is what IPRS's own
+  // 3-hourly reconciliation scheduler expects to find and re-check (see the module doc comment).
+  await paymentRepository.createResult({
     AccountId: userId,
-    TxnId: txnId,
-    Amount: numAmount,
-    Currency: 'INR',
-    Status: PAYMENT_STATUS.PENDING,
-    ProductInfo: info,
-    CustomerName: customerName,
-    CustomerEmail: customerEmail,
-    CustomerPhone: customerPhone,
+    TransactionNo: txnId,
+    PaymentStatus: REG_PAYMENT_STATUS_CODE.UNCONFIRMED,
+    PaymentAmount: numAmount,
+    PaidAmount: '0',
+    PaymentDate: new Date(),
+    CreateDate: new Date(),
+    CreatedBy: 'ADMINISTRATOR',
+    ModifedBy: customerName || null,
+    ModifedDate: new Date(),
   });
 
   logger.info({ userId, txnId, amount: numAmount }, 'Initiated PayU payment transaction');
@@ -118,7 +136,6 @@ async function initiatePayment({ userId, productInfo }) {
   const actionUrl = `${env.PAYU_BASE_URL.replace(/\/+$/, '')}/_payment`;
 
   return {
-    payment: toPublic(paymentRecord),
     key: env.PAYU_KEY,
     txnId,
     amount: formattedAmount,
@@ -165,50 +182,41 @@ async function handlePayuCallback(payuPayload) {
 
   if (!isValidSignature) {
     logger.warn({ txnId, payload: payuPayload }, 'PayU callback signature verification failed');
-    try {
-      const existing = await paymentRepository.findByTxnId(txnId);
-      if (existing) {
-        await paymentRepository.updatePaymentByTxnId(txnId, {
-          Status: PAYMENT_STATUS.FAILED,
-          ErrorMessage: 'Signature / Hash verification failed',
-          PayuResponse: JSON.stringify(payuPayload),
-        });
-      }
-    } catch {
-      // Non-fatal if DB is unreachable or table not yet migrated during signature validation
-    }
     throw badRequestError('Invalid payment signature');
   }
 
   const existing = await paymentRepository.findByTxnId(txnId);
-
-
   if (!existing) {
+    // Should not happen - initiatePayment() always creates the row - but a callback for a
+    // transaction we truly have no record of at all is not something to silently accept.
     logger.warn({ txnId }, 'PayU callback received for unknown transaction ID');
     throw notFoundError('Payment transaction not found');
   }
 
   const rawStatus = String(payuPayload.status || '').trim().toLowerCase();
   const isSuccess = rawStatus === 'success';
-  const newStatus = isSuccess ? PAYMENT_STATUS.SUCCESS : PAYMENT_STATUS.FAILED;
+  const responseString = new URLSearchParams(
+    Object.entries(payuPayload).filter(([, v]) => v != null),
+  ).toString();
 
-  const updated = await paymentRepository.updatePaymentByTxnId(txnId, {
-    Status: newStatus,
-    MihPayId: payuPayload.mihpayid ? String(payuPayload.mihpayid) : null,
-    PaymentMode: payuPayload.mode ? String(payuPayload.mode) : null,
-    BankRefNo: payuPayload.bank_ref_num ? String(payuPayload.bank_ref_num) : null,
-    PayuResponse: JSON.stringify(payuPayload),
-    ErrorMessage: isSuccess ? null : (payuPayload.error_Message || payuPayload.unmappedstatus || 'Payment failed'),
+  const saved = await paymentRepository.updateResultByTxnId(txnId, {
+    // Stays at UNCONFIRMED (1) on failure - not a separate "failed" code, matching IPRS's own
+    // scheduler semantics (see the module doc comment).
+    PaymentStatus: isSuccess ? REG_PAYMENT_STATUS_CODE.SUCCESS : REG_PAYMENT_STATUS_CODE.UNCONFIRMED,
+    PaymentGatewayResponse: isSuccess ? 'Status=success' : `Status=failure--${(payuPayload.error_Message || payuPayload.unmappedstatus || 'Payment failed')}`.slice(0, 500),
+    ResponseNo: payuPayload.mihpayid ? String(payuPayload.mihpayid) : null,
+    ResponseString: responseString,
+    PaidAmount: isSuccess ? String(payuPayload.amount ?? existing.PaymentAmount ?? '') : '0',
   });
 
   logger.info(
-    { userId: String(existing.AccountId), txnId, status: newStatus, mihpayid: payuPayload.mihpayid },
+    { userId: String(saved.AccountId), txnId, isSuccess, mihpayid: payuPayload.mihpayid },
     'Processed PayU payment callback',
   );
 
   // If successful, attempt to mark the registration complete
   if (isSuccess) {
-    const userIdStr = String(existing.AccountId);
+    const userIdStr = String(saved.AccountId);
     try {
       await registrationService.complete(userIdStr, userIdStr);
       logger.info({ userId: userIdStr, txnId }, 'Registration completed on payment confirmation');
@@ -228,11 +236,22 @@ async function handlePayuCallback(payuPayload) {
     }
   }
 
-  return toPublic(updated);
+  // This callback just got a definite answer from PayU itself, right now - report it precisely
+  // (SUCCESS/FAILED), rather than toPublic()'s more cautious PENDING default for an unconfirmed
+  // row (that default is for a row read with no live context behind it, which this isn't).
+  return {
+    ...toPublic(saved),
+    status: isSuccess ? PAYMENT_STATUS.SUCCESS : PAYMENT_STATUS.FAILED,
+    errorMessage: isSuccess ? null : (payuPayload.error_Message || payuPayload.unmappedstatus || 'Payment failed'),
+  };
 }
 
 /**
- * Checks or verifies the payment status of a transaction for the authenticated member.
+ * Checks or verifies the payment status of a transaction for the authenticated member. A row at
+ * PaymentStatus 1 (unconfirmed) triggers the same live PayU verify_payment webservice check
+ * IPRS's own 3-hourly scheduler performs - this is just the on-demand equivalent of it. Only ever
+ * writes PaymentStatus 0 on a confirmed success; a live-confirmed failure or "still no info" both
+ * leave the row at 1 for the scheduler (or the next check here) to retry later.
  */
 async function verifyPaymentStatus({ userId, txnId }) {
   const existing = await paymentRepository.findByTxnId(txnId);
@@ -244,37 +263,46 @@ async function verifyPaymentStatus({ userId, txnId }) {
     throw forbiddenError('Transaction does not belong to the authenticated user');
   }
 
-  // If still pending, query PayU's verify_payment webservice directly
-  if (existing.Status === PAYMENT_STATUS.PENDING) {
-    const check = await payuClient.verifyPayment(txnId);
-    if (check.verified && check.transaction) {
-      const details = check.transaction;
-      const isSuccess = details.status?.toLowerCase() === 'success';
-      const newStatus = isSuccess ? PAYMENT_STATUS.SUCCESS : PAYMENT_STATUS.FAILED;
-
-      const updated = await paymentRepository.updatePaymentByTxnId(txnId, {
-        Status: newStatus,
-        MihPayId: details.mihpayid ? String(details.mihpayid) : null,
-        PaymentMode: details.mode ? String(details.mode) : null,
-        BankRefNo: details.bank_ref_num ? String(details.bank_ref_num) : null,
-        PayuResponse: JSON.stringify(check.raw ?? {}),
-        ErrorMessage: isSuccess ? null : (details.error_Message || details.unmappedstatus || 'Payment failed'),
-      });
-
-      if (isSuccess) {
-        try {
-          const userIdStr = String(existing.AccountId);
-          await registrationService.complete(userIdStr, userIdStr);
-        } catch {
-          // ignore incomplete requirements
-        }
-      }
-
-      return toPublic(updated);
-    }
+  if (existing.PaymentStatus === REG_PAYMENT_STATUS_CODE.SUCCESS) {
+    return toPublic(existing);
   }
 
-  return toPublic(existing);
+  const check = await payuClient.verifyPayment(txnId);
+  if (!check.verified && !check.transaction) {
+    // PayU has no definite info either - genuinely still pending, row stays untouched.
+    return toPublic(existing);
+  }
+
+  const details = check.transaction;
+  const isSuccess = details.status?.toLowerCase() === 'success';
+
+  if (isSuccess) {
+    const updated = await paymentRepository.updateResultByTxnId(txnId, {
+      PaymentStatus: REG_PAYMENT_STATUS_CODE.SUCCESS,
+      PaymentGatewayResponse: 'Status=success',
+      ResponseNo: details.mihpayid ? String(details.mihpayid) : existing.ResponseNo,
+      ResponseString: JSON.stringify(check.raw ?? {}),
+      PaidAmount: String(existing.PaymentAmount ?? ''),
+    });
+
+    try {
+      const userIdStr = String(updated.AccountId);
+      await registrationService.complete(userIdStr, userIdStr);
+    } catch {
+      // ignore incomplete requirements
+    }
+
+    return toPublic(updated);
+  }
+
+  // PayU confirms this did NOT succeed - tell the caller precisely, but leave the row at 1
+  // (unconfirmed), matching IPRS's own scheduler semantics rather than inventing a separate
+  // "failed" code.
+  return {
+    ...toPublic(existing),
+    status: PAYMENT_STATUS.FAILED,
+    errorMessage: details.error_Message || details.unmappedstatus || 'Payment failed',
+  };
 }
 
 /**

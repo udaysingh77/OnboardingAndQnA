@@ -57,7 +57,9 @@ model AppAccounts {
   GeographicalName_PR        String?   @db.NVarChar(100)
   Alt_EmailId                String?   @db.NVarChar(100)
   AccountEmail               String?   @db.NVarChar(100)
-  AccountPassword            String?   @db.NVarChar(500)
+  // Unused by this app (never read/written in src/) - narrowed back to match prod's real width
+  // after comparing against mraai_uat; the local NVarChar(500) was inert leftover, not intentional.
+  AccountPassword            String?   @db.NVarChar(100)
   AccountWeb                 String?   @db.NVarChar(50)
   TaxMasterId                BigInt?   @default(0, map: "DF_LedgerMaster_TaxMasterId")
   MessageType                Int?      @default(0, map: "DF_LedgerMaster_MessageType") @db.TinyInt
@@ -72,10 +74,9 @@ model AppAccounts {
   MicrCode                   String?   @db.NVarChar(50)
   RollTypeIds                String?   @db.NVarChar(50)
   RecordStatus               Int?      @default(0, map: "DF_AccountMaster_AccountStatus") @db.TinyInt
-  EntityType                 String?   @db.NVarChar(50)
-  // Which of the 4 fee-determining paths ("(Individual) Author / Composer", "(NRI) Author /
-  // Composer", "Owner/Publisher", "(NRI) Owner/Publisher") - see scripts/add-applicant-path-column.sql
-  ApplicantPath               String?   @db.NVarChar(50)
+  // IPRS's own 2-letter code: CP = Company, PR = Partnership, SP = Sole Proprietor (their team
+  // confirmed the meanings) - see memberRoleCodes.js.
+  EntityType                 String?   @db.NVarChar(10)
   ApplicationStatus          Int?      @db.TinyInt
   OverseasSocietyName        String?   @db.NVarChar(150)
   AssociationName_India      String?   @db.NVarChar(150)
@@ -112,8 +113,8 @@ model AppAccounts {
   LanguageName               String?   @db.NVarChar(100)
   InternalIdentificationName String?   @db.NVarChar(50)
   IPINumber                  String?   @db.NVarChar(100)
-  PANNo                      String?   @db.NVarChar(10)
-  GSTNo                      String?   @db.NVarChar(15)
+  // PAN and GST live in Detail2/Detail1 (generic columns IPRS's real schema already has) rather
+  // than columns of this app's own - see registrationReview.service.js's SECTIONS comment.
   ChanlDesc                  String?   @db.NVarChar(Max)
   SocialSecurityNo           String?   @db.NVarChar(100)
   TRCNo                      String?   @db.NVarChar(100)
@@ -136,7 +137,6 @@ model AppAccounts {
   Consent                    Int?      @default(0, map: "DF_App_Accounts_Consent_1") @db.TinyInt
   PublicIP                   String?   @db.NVarChar(50)
   Macid                      String?   @db.NVarChar(50)
-  GUID                       String?   @db.NVarChar(50)
   ConsentDate                DateTime? @db.DateTime
   misasiaMemIntNo            String?   @db.NVarChar(50)
   requestId                  BigInt?
@@ -432,6 +432,22 @@ model MemberRoleTypeLookUp {
   @@map("MemberRoleType_LookUp")
 }
 
+// Not in the original mra_cleaned.sql dump - App_Accounts.LanguageId is a bare BigInt with no FK
+// in this schema (Prisma can't express one to a table it doesn't model), but it really is a
+// foreign key into this table in prod (confirmed against mraai_uat). Mirrored locally, data and
+// all, because it's static reference data (218 languages) rather than member data - see
+// scripts/add-language-lookup-table.sql and languageLookup.service.js.
+model AppLanguageLookup {
+  LanguageId     BigInt  @id(map: "PK_App_Language_Lookup") @default(autoincrement())
+  LanguageFamily String? @db.NVarChar(200)
+  LanguageName   String? @db.NVarChar(200)
+  NativeName     String? @db.NVarChar(100)
+  LanguageCode   String? @db.NVarChar(100)
+  LanguageDesc   String? @db.NVarChar(Max)
+
+  @@map("App_Language_Lookup")
+}
+
 model AppAccountsTemp {
   TempAccountId    BigInt    @default(autoincrement())
   AccountName      String?   @db.NVarChar(100)
@@ -475,19 +491,6 @@ model AppAccountsTemp {
   @@ignore
 }
 
-model EmailVerificationOtp {
-  id         BigInt   @id @default(autoincrement())
-  email      String   @db.NVarChar(256)
-  otpHash    String   @db.NVarChar(256)
-  expiresAt  DateTime @db.DateTime
-  attempts   Int      @default(0)
-  verifiedAt DateTime?
-  createdAt  DateTime @default(now()) @db.DateTime
-  updatedAt  DateTime @updatedAt @db.DateTime
-
-  @@map("Email_Verification_Otp")
-}
-
 model MemberRoleTypeLookUpFees {
   LookupId     BigInt?
   RoleType     String? @db.NVarChar(10)
@@ -498,28 +501,34 @@ model MemberRoleTypeLookUpFees {
   @@ignore
 }
 
-/// Transaction records for onboarding membership fee payments via PayU.
-/// Created by scripts/add-payment-table.sql and hand-added here rather than via `db push`.
-model AppAccountsPayment {
-  PaymentId     BigInt   @id(map: "PK_App_Accounts_Payment") @default(autoincrement())
-  AccountId     BigInt
-  TxnId         String   @unique(map: "UQ_App_Accounts_Payment_TxnId") @db.NVarChar(100)
-  MihPayId      String?  @db.NVarChar(100)
-  Amount        Float
-  Currency      String   @default("INR", map: "DF_App_Accounts_Payment_Currency") @db.NVarChar(10)
-  Status        String   @default("PENDING", map: "DF_App_Accounts_Payment_Status") @db.NVarChar(50)
-  PaymentMode   String?  @db.NVarChar(50)
-  BankRefNo     String?  @db.NVarChar(100)
-  ProductInfo   String?  @db.NVarChar(255)
-  CustomerName  String?  @db.NVarChar(100)
-  CustomerEmail String?  @db.NVarChar(100)
-  CustomerPhone String?  @db.NVarChar(50)
-  PayuResponse  String?  @db.NVarChar(Max)
-  ErrorMessage  String?  @db.NVarChar(500)
-  CreateDate    DateTime @default(now(), map: "DF_App_Accounts_Payment_CreateDate") @db.DateTime
-  ModifedDate   DateTime @default(now(), map: "DF_App_Accounts_Payment_ModifedDate") @db.DateTime
+/// IPRS's REAL registration-payment table - already exists and is actively used in production
+/// (mraai_uat, confirmed via real PayU transaction rows at the same fee amounts this app
+/// charges). Replaces this app's own previously-invented App_Accounts_Payment table (see
+/// scripts/add-regpayment-table.sql for the full story and PaymentStatus semantics: 0 = success,
+/// 1 = failed - no row is written until a final result is known, matching how prod's own data
+/// shows this table being used).
+model AppAccountsRegPayment {
+  PaymentRecieptId       BigInt    @id(map: "PK_App_Accounts_RegPayment") @default(autoincrement())
+  AccountId              BigInt
+  TransactionNo          String?   @unique(map: "UQ_App_Accounts_RegPayment_TransactionNo") @db.NVarChar(100)
+  PaymentRecieptNo       String?   @db.NVarChar(100)
+  PaymentStatus          Int?      @db.TinyInt
+  PaymentGatewayResponse String?   @db.NVarChar(500)
+  PaymentBankName        String?   @db.NVarChar(100)
+  PaymentDate            DateTime? @db.DateTime
+  ResponseNo             String?   @db.NVarChar(100)
+  ResponseString         String?   @db.NVarChar(Max)
+  LastTransactionNo      String?   @db.NVarChar(100)
+  LastResponseNo         String?   @db.NVarChar(100)
+  LastResponseString     String?   @db.NVarChar(Max)
+  PaymentAmount          Float?    @db.Money
+  PaidAmount             String?   @db.NVarChar(100)
+  CreateDate             DateTime? @db.DateTime
+  CreatedBy              String?   @db.NVarChar(100)
+  ModifedBy              String?   @db.NVarChar(100)
+  ModifedDate            DateTime? @db.DateTime
 
-  @@index([AccountId], map: "IX_App_Accounts_Payment_AccountId")
-  @@map("App_Accounts_Payment")
+  @@index([AccountId], map: "IX_App_Accounts_RegPayment_AccountId")
+  @@map("App_Accounts_RegPayment")
 }
 

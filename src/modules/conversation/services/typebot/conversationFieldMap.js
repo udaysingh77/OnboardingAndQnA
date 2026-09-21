@@ -9,18 +9,24 @@
 // blocks' variable is added/renamed there.
 // ==================================================================
 export const ACCOUNT_FIELD_BY_VARIABLE_ID = {
-  vqpmuqooo8wn2ktrfx9uf4l1j: 'GSTNo', // GST no
+  // GST no. Stored in Detail1 - a column IPRS's real schema already has, so no new column is
+  // needed for it (this app used to add its own GSTNo column and write both).
+  vqpmuqooo8wn2ktrfx9uf4l1j: 'Detail1',
   vixob6tfcj9w3m44slwh3p1kq: 'AccountAlias', // alias / stage name
   virpfcnue17syf7ua2hbuj5d1: 'AccountEmail', // email input
   vy80zc5eoveac6euqlurki58o: 'PlaceOfBirth', // place of birth
-  vcf06ka3xjtg0u940pk0qd7os: 'RollTypeIds', // role: lyricist / composer / both
+  // Role: Lyricist / Composer / Both. Stored as the numeric MemberRoleType_LookUp ids IPRS's own
+  // database uses ("2", "1", "2,1", and the NRI equivalents) - see memberRoleCodes.js.
+  vcf06ka3xjtg0u940pk0qd7os: 'RollTypeIds',
   // The 4-way "(Individual) Author / Composer" / "(NRI) Author / Composer" / "Owner/Publisher" /
   // "(NRI) Owner/Publisher" fork (Group #3). Originally had NO variable assigned - a pure
   // navigation choice, same failure mode Territory hit before it got one (see below) - so the
   // answer was never persisted and payu/feeSchedule.js's lookup against RollTypeIds (which
   // actually holds the Lyricist/Composer/Both answer above, a different question) always missed.
   // Fixed the same way Territory was: assigned this variable in Studio and republished.
-  vjxwoc559admtu01nvecsfrbe: 'ApplicantPath',
+  // Stored as IPRS's own registration-type code (I/NI/C/NC) in the column their system already
+  // uses for exactly this, rather than a column of ours - see memberRoleCodes.js.
+  vjxwoc559admtu01nvecsfrbe: 'AccountRegType',
   // territory applied for (INDIA/WORLD) - variableId changed when the new "all flow fanished"
   // typebot was published (was vufrpq6qr5rpcbewbffajjb73 in the old, individual-only flow).
   vn91tusicqaolw34d4zq2id33: 'TeritoryAppFor',
@@ -37,10 +43,14 @@ export const ACCOUNT_FIELD_BY_VARIABLE_ID = {
   vqexarbwxbco7g0kwjermqjr3: 'KindAttention1', // designation (signatory's)
   vsa8t0hiliqcntol02f3aja0y: 'AccountAddress', // registered_address_type - manual "Type registered address" entry
   vwl4gde0bw4a5vqvpp1szcpci: 'AccountAddress_PR', // comm_address2_type - manual "Type communication address" entry
-  // Owner/Publisher path's entity-type fork. The answers ("Corporate (Pvt Ltd/Ltd Company)",
-  // "Partnership", "sole proprietry consern") are stored verbatim - EntityType was widened from
-  // NVarChar(10) to NVarChar(50) for this, since all three overflow the original width.
-  vdrt7gflf0w9rwhkdwbk27mhf: 'EntityType', // EntityType
+  // Owner/Publisher path's entity-type fork, stored as IPRS's own CP/PR/SP code (their team
+  // confirmed these mean Company / Partnership / Sole Proprietor) - see memberRoleCodes.js.
+  vdrt7gflf0w9rwhkdwbk27mhf: 'EntityType',
+  // "What is your mother tongue?" - free text (a text input block, not choice buttons), asked on
+  // all four paths under the same variable. Special-cased in saveConversationField: the answer is
+  // stored as-is in LanguageName and, on a confident match, also resolved to IPRS's own
+  // App_Language_Lookup.LanguageId - see languageLookup.service.js.
+  vh4f2w089zbn113mboiqtm37f: 'LanguageName',
 };
 
 export function resolveConversationField(variableId) {

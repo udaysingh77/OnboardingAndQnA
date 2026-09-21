@@ -113,7 +113,7 @@ const envSchema = z.object({
   PAYU_BASE_URL: z.string().default('https://test.payu.in'),
   PAYU_WEBSERVICE_URL: z.string().default('https://test.payu.in/merchant/postservice.php?form=2'),
   // No PAYU_DEFAULT_AMOUNT: the fee is never configurable or client-supplied. It is resolved
-  // server-side from the member's own applicant-path answer (ApplicantPath) via payu/feeSchedule.js, and
+  // server-side from the member's own registration type (AccountRegType) via payu/feeSchedule.js, and
   // initiatePayment() refuses to start a payment it cannot price rather than falling back.
   // Where PayU itself POSTs the payment result back to (surl/furl sent in the initiate request) -
   // must be OUR OWN publicly reachable /payment/callback endpoint, not a page PayU or the frontend

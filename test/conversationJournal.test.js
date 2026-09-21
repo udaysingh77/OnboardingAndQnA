@@ -317,8 +317,8 @@ test('resuming shows a summary of what was already told, read from the database'
     data: {
       AccountEmail: 'resume-test@example.com',
       PlaceOfBirth: 'Banaras',
-      RollTypeIds: 'Both',
-      ApplicantPath: '(Individual) Author / Composer',
+      RollTypeIds: '2,1', // Both
+      AccountRegType: 'I',
     },
   });
 

@@ -15,12 +15,14 @@
 import { notFoundError } from '../../../shared/errors.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { workRepository } from '../../work/repositories/work.repository.js';
+import { describeEntityType, describeRegType, describeRollTypeIds } from './memberRoleCodes.js';
 
 // Column -> what the member should see it called. Order within each section is the order shown.
 //
-// Detail1-Detail12 are deliberately absent: they're internal duplicates (Detail1 = GST,
-// Detail2 = PAN, Detail10 = a source tag), and printing the same value twice under a meaningless
-// name makes a review harder to check, not easier.
+// Detail1/Detail2 appear here under their real meaning (GST / PAN) - they're generic columns
+// IPRS's schema already has, and this app stores those two values there rather than adding
+// columns of its own. The other Detail* columns stay out: Detail10 is an internal source tag,
+// and the rest hold nothing this app writes.
 const SECTIONS = [
   {
     title: 'Your details',
@@ -31,6 +33,7 @@ const SECTIONS = [
       ['PlaceOfBirth', 'Place of birth'],
       ['Nationality', 'Nationality'],
       ['DualNationality', 'Dual nationality'],
+      ['LanguageName', 'Mother tongue'],
       ['AccountEmail', 'Email'],
       ['AccountMobile', 'Mobile'],
     ],
@@ -38,11 +41,11 @@ const SECTIONS = [
   {
     title: 'Membership',
     fields: [
-      ['ApplicantPath', 'Applying as'],
+      ['AccountRegType', 'Applying as'],
       ['RollTypeIds', 'Role'],
       ['EntityType', 'Entity type'],
       ['TeritoryAppFor', 'Territory'],
-      ['GSTNo', 'GST number'],
+      ['Detail1', 'GST number'],
       ['AssociationName_India', 'Member of another society'],
       ['KindAttention1', 'Designation'],
     ],
@@ -54,7 +57,7 @@ const SECTIONS = [
       ['AccountAddress_PR', 'Current / communication'],
     ],
   },
-  { title: 'Identity', fields: [['PANNo', 'PAN']] },
+  { title: 'Identity', fields: [['Detail2', 'PAN']] },
   {
     // Shown in full, on purpose. These are the OCR-derived fields - masking the account number
     // would hide the single most expensive thing to get wrong.
@@ -115,6 +118,12 @@ function formatValue(column, value) {
 
   // DualNationality is an Int column holding a Yes/No answer (see saveConversationField).
   if (column === 'DualNationality') return value === 1 ? 'Yes' : 'No';
+
+  // Both of these hold IPRS's own codes, not the member's words - "I" and "2,1" mean nothing to
+  // the person checking their own details, so show what they actually picked.
+  if (column === 'AccountRegType') return describeRegType(value);
+  if (column === 'RollTypeIds') return describeRollTypeIds(value);
+  if (column === 'EntityType') return describeEntityType(value);
 
   const text = String(value).trim();
   return text.length > 0 ? text : null;

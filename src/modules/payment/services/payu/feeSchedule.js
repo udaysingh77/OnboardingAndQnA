@@ -1,37 +1,35 @@
 // ==================================================================
-// Membership application fee, by role path.
+// Membership application fee, by registration type.
 //
-// Keyed by AppAccounts.ApplicantPath - the answer to the flow's opening 4-way fork (Group #3:
-// "(Individual) Author / Composer" / "(NRI) Author / Composer" / "Owner/Publisher" /
-// "(NRI) Owner/Publisher"), verbatim as conversationFieldMap.js stores it (saveConversationField()
-// only trims it, no case-folding), so these keys must match that choice input's item labels exactly.
+// Keyed by AppAccounts.AccountRegType - IPRS's own code for which of the flow's four opening
+// paths a member took (I = Individual, NI = NRI Individual, C = Owner/Publisher,
+// NC = NRI Owner/Publisher). See memberRoleCodes.js for how the Typebot answer becomes that code.
 //
-// NOT keyed by RollTypeIds - that column holds a different, later question's answer
-// ("Lyricist"/"Composer"/"Both", Group #5), which was this table's original (wrong) key: the
-// Group #3 fork had no Typebot variable at all until it was fixed the same way Territory was, so
-// every real member's fee lookup returned REGISTRATION_INCOMPLETE. See
-// scripts/add-applicant-path-column.sql for the full story.
+// These amounts match IPRS's own MemberRoleType_LookUp_Fees table exactly (IL/IM/ILIM = 1200,
+// ILN/IMN = 2700, CP = 2200, CPN = 3700, read from the live mraai_uat database). They're kept
+// here rather than read from that table because our local copy of it is empty - but since the
+// keys line up, switching to read it live is a small change if that's ever wanted.
 //
-// Owner/Publisher's fee is the same across all three entity types (Corporate/Partnership/Sole
-// Proprietary) - EntityType plays no part in the fee, only ApplicantPath does.
+// The role question (Lyricist/Composer/Both, stored in RollTypeIds) does NOT change the fee, and
+// neither does EntityType - within one registration type every role pays the same.
 // ==================================================================
-const FEES_BY_ROLL_TYPE = Object.freeze({
-  '(Individual) Author / Composer': 1200,
-  '(NRI) Author / Composer': 2700,
-  'Owner/Publisher': 2200,
-  '(NRI) Owner/Publisher': 3700,
+const FEES_BY_REG_TYPE = Object.freeze({
+  I: 1200,
+  NI: 2700,
+  C: 2200,
+  NC: 3700,
 });
 
 /**
- * Resolves the application fee for a member from their stored applicant-path answer.
- * @param {string|null|undefined} applicantPath - AppAccounts.ApplicantPath
- * @returns {number|null} the fee in rupees, or null if the path isn't recognised (not yet
- *   answered, or the flow's fork wording changed and this table needs updating)
+ * Resolves the application fee for a member from their stored registration type.
+ * @param {string|null|undefined} regType - AppAccounts.AccountRegType (I/NI/C/NC)
+ * @returns {number|null} the fee in rupees, or null if the type isn't recognised (the opening
+ *   path question isn't answered yet, or the flow's fork changed and this table needs updating)
  */
-export function resolveFee(applicantPath) {
-  const key = typeof applicantPath === 'string' ? applicantPath.trim() : '';
+export function resolveFee(regType) {
+  const key = typeof regType === 'string' ? regType.trim() : '';
   if (!key) return null;
-  return FEES_BY_ROLL_TYPE[key] ?? null;
+  return FEES_BY_REG_TYPE[key] ?? null;
 }
 
-export { FEES_BY_ROLL_TYPE };
+export { FEES_BY_REG_TYPE };

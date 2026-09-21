@@ -1,59 +1,7 @@
 import { strict as assert } from 'assert';
 import test from 'node:test';
 import { createEmailOtpService } from '../src/modules/auth/services/emailOtp.service.js';
-
-function makeFakeDb() {
-  let idCounter = 1;
-  const rows = [];
-
-  return {
-    emailVerificationOtp: {
-      async findFirst({ where, orderBy }) {
-        const email = where.email;
-        // find latest matching
-        const candidates = rows.filter((r) => r.email === email && (where.verifiedAt === null ? r.verifiedAt === null : true));
-        if (!candidates.length) return null;
-        candidates.sort((a, b) => b.createdAt - a.createdAt);
-        return { ...candidates[0] };
-      },
-      async updateMany({ where, data }) {
-        const email = where.email;
-        for (const r of rows) {
-          if (r.email === email && r.verifiedAt === null && r.expiresAt > new Date()) {
-            if (data.expiresAt) r.expiresAt = data.expiresAt;
-          }
-        }
-        return { count: 1 };
-      },
-      async create({ data }) {
-        const rec = {
-          id: idCounter++,
-          email: data.email,
-          otpHash: data.otpHash,
-          expiresAt: data.expiresAt,
-          attempts: data.attempts ?? 0,
-          verifiedAt: null,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
-        rows.push(rec);
-        return { ...rec };
-      },
-      async findUnique({ where }) {
-        return rows.find((r) => r.id === where.id) ?? null;
-      },
-      async update({ where, data }) {
-        const rec = rows.find((r) => r.id === where.id);
-        if (!rec) throw new Error('not found');
-        if (data.attempts && data.attempts.increment) rec.attempts += data.attempts.increment;
-        if (data.expiresAt) rec.expiresAt = data.expiresAt;
-        if (data.verifiedAt) rec.verifiedAt = data.verifiedAt;
-        rec.updatedAt = new Date();
-        return { ...rec };
-      },
-    },
-  };
-}
+import { createEmailOtpStore } from '../src/modules/auth/services/emailOtpStore.js';
 
 const cfg = {
   EMAIL_OTP_LENGTH: 4,
@@ -63,14 +11,13 @@ const cfg = {
 };
 
 test('Send OTP and verify successfully', async () => {
-  const fakeDb = makeFakeDb();
   let sent = null;
   const mailer = async ({ to, subject, text }) => {
     sent = { to, subject, text };
     return { messageId: 'ok' };
   };
 
-  const svc = createEmailOtpService({ db: fakeDb, mailer, cfg });
+  const svc = createEmailOtpService({ store: createEmailOtpStore(), mailer, cfg });
   await svc.sendEmailOtp({ email: 'u@example.com' });
   assert.equal(sent.to, 'u@example.com');
   // extract otp from text
@@ -83,10 +30,9 @@ test('Send OTP and verify successfully', async () => {
 });
 
 test('Resend cooldown prevents immediate resend', async () => {
-  const fakeDb = makeFakeDb();
   let sendCount = 0;
   const mailer = async () => { sendCount++; return { messageId: 'ok' }; };
-  const svc = createEmailOtpService({ db: fakeDb, mailer, cfg });
+  const svc = createEmailOtpService({ store: createEmailOtpStore(), mailer, cfg });
 
   await svc.sendEmailOtp({ email: 'a@example.com' });
   let thrown = false;
@@ -103,7 +49,7 @@ test('Cooldown message tells the member how long to wait', async () => {
   // The message is shown verbatim in the chat (the conversation engine passes err.message into
   // describeOtpProblem), so "please wait" with no number leaves them retrying blind.
   const svc = createEmailOtpService({
-    db: makeFakeDb(),
+    store: createEmailOtpStore(),
     mailer: async () => ({ messageId: 'ok' }),
     cfg: { ...cfg, EMAIL_OTP_RESEND_COOLDOWN_SECONDS: 60 },
   });
@@ -123,7 +69,7 @@ test('Cooldown message tells the member how long to wait', async () => {
 
 test('Cooldown message says "1 second", not "1 seconds"', async () => {
   const svc = createEmailOtpService({
-    db: makeFakeDb(),
+    store: createEmailOtpStore(),
     mailer: async () => ({ messageId: 'ok' }),
     cfg: { ...cfg, EMAIL_OTP_RESEND_COOLDOWN_SECONDS: 1 },
   });
@@ -139,10 +85,9 @@ test('Cooldown message says "1 second", not "1 seconds"', async () => {
 });
 
 test('Max attempts locks OTP after failures', async () => {
-  const fakeDb = makeFakeDb();
   let sent = null;
   const mailer = async ({ text }) => { sent = text; return { messageId: 'ok' }; };
-  const svc = createEmailOtpService({ db: fakeDb, mailer, cfg });
+  const svc = createEmailOtpService({ store: createEmailOtpStore(), mailer, cfg });
 
   await svc.sendEmailOtp({ email: 'b@example.com' });
   const m = sent.match(/(\d{4})/);
