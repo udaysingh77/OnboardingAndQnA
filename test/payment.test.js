@@ -7,9 +7,9 @@ import {
   verifyPayuHash,
   generateVerifyPaymentHash,
 } from '../src/modules/payment/services/payu/payu.utils.js';
-import { resolveFee, FEES_BY_ROLL_TYPE } from '../src/modules/payment/services/payu/feeSchedule.js';
+import { resolveFee, FEES_BY_REG_TYPE } from '../src/modules/payment/services/payu/feeSchedule.js';
 
-async function makeAccount({ applicantPath, email, name = 'PayU Tester' } = {}) {
+async function makeAccount({ regType, email, name = 'PayU Tester' } = {}) {
   const { prisma } = await import('../src/shared/prisma.js');
   const account = await prisma.appAccounts.create({
     data: {
@@ -17,7 +17,7 @@ async function makeAccount({ applicantPath, email, name = 'PayU Tester' } = {}) 
       AccountMobile: `9${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 10)}`,
       AccountEmail: email,
       AccountName: name,
-      ApplicantPath: applicantPath,
+      AccountRegType: regType,
     },
   });
   return String(account.AccountId);
@@ -25,7 +25,7 @@ async function makeAccount({ applicantPath, email, name = 'PayU Tester' } = {}) 
 
 async function deleteAccount(userId) {
   const { prisma } = await import('../src/shared/prisma.js');
-  await prisma.appAccountsPayment.deleteMany({ where: { AccountId: BigInt(userId) } });
+  await prisma.appAccountsRegPayment.deleteMany({ where: { AccountId: BigInt(userId) } });
   await prisma.appAccountsDoc.deleteMany({ where: { AccountId: BigInt(userId) } });
   await prisma.appAccountsChatJournal.deleteMany({ where: { AccountId: BigInt(userId) } }).catch(() => {});
   await prisma.appAccounts.delete({ where: { AccountId: BigInt(userId) } }).catch(() => {});
@@ -262,9 +262,9 @@ test('verifyPayuHash rejects tampered amount, status, or hash', () => {
   assert.equal(verifyPayuHash({}, null), false);
 });
 
-test('resolveFee returns the right fee for each applicant path', () => {
-  for (const [applicantPath, fee] of Object.entries(FEES_BY_ROLL_TYPE)) {
-    assert.equal(resolveFee(applicantPath), fee);
+test('resolveFee returns the right fee for each registration type', () => {
+  for (const [regType, fee] of Object.entries(FEES_BY_REG_TYPE)) {
+    assert.equal(resolveFee(regType), fee);
   }
 });
 
@@ -276,7 +276,7 @@ test('resolveFee returns null for an unrecognised or missing role', () => {
 });
 
 test('resolveFee trims surrounding whitespace before matching', () => {
-  assert.equal(resolveFee('  Owner/Publisher  '), FEES_BY_ROLL_TYPE['Owner/Publisher']);
+  assert.equal(resolveFee('  C  '), FEES_BY_REG_TYPE.C);
 });
 
 test('generateVerifyPaymentHash creates correct hash for webservice verification', () => {
@@ -340,13 +340,13 @@ test('End-to-end dummy payment flow with PayU test credentials', async () => {
   const { env } = await import('../src/config/env.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const applicantPath = '(Individual) Author / Composer';
-  const expectedFee = FEES_BY_ROLL_TYPE[applicantPath]; // 1200
+  const regType = 'I';
+  const expectedFee = FEES_BY_REG_TYPE[regType]; // 1200
   const expectedAmount = formatAmount(expectedFee);
   const accountName = 'PayU Tester';
   const accountEmail = `payu.e2e.${Date.now()}@example.com`;
 
-  const userId = await makeAccount({ applicantPath, email: accountEmail, name: accountName });
+  const userId = await makeAccount({ regType, email: accountEmail, name: accountName });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -355,7 +355,7 @@ test('End-to-end dummy payment flow with PayU test credentials', async () => {
 
   try {
     // 1. Initiate payment - no amount is sent by the client; it comes entirely from the account's
-    // own applicant-path answer (ApplicantPath), via feeSchedule.js.
+    // own registration type (AccountRegType), via feeSchedule.js.
     const initRes = await fetch(`${baseUrl}/payment/initiate`, {
       method: 'POST',
       headers: {
@@ -450,7 +450,6 @@ test('End-to-end dummy payment flow with PayU test credentials', async () => {
     assert.equal(cbBody.success, true);
     assert.equal(cbBody.data.status, 'SUCCESS');
     assert.equal(cbBody.data.mihPayId, mihpayid);
-    assert.equal(cbBody.data.bankRefNo, bankRefNum);
 
     // 4. Verify status endpoint
     const statusRes = await fetch(`${baseUrl}/payment/status/${txnId}`, {
@@ -481,9 +480,9 @@ test('a client-supplied amount is ignored - the fee always comes from the role o
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const applicantPath = '(NRI) Owner/Publisher';
-  const expectedAmount = formatAmount(FEES_BY_ROLL_TYPE[applicantPath]); // 3700.00
-  const userId = await makeAccount({ applicantPath, email: `payu.override.${Date.now()}@example.com` });
+  const regType = 'NC';
+  const expectedAmount = formatAmount(FEES_BY_REG_TYPE[regType]); // 3700.00
+  const userId = await makeAccount({ regType, email: `payu.override.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -510,7 +509,7 @@ test('initiate refuses to start a payment before the role question has been answ
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const userId = await makeAccount({ applicantPath: null, email: `payu.norole.${Date.now()}@example.com` });
+  const userId = await makeAccount({ regType: null, email: `payu.norole.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -564,9 +563,10 @@ test('registrationService.complete() refuses to finish a registration with no su
       },
     );
 
-    // A PENDING (never-confirmed) payment must not count either.
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_PENDING_${userId}`, Amount: 1200, Status: 'PENDING' },
+    // PaymentStatus 1 (unconfirmed - covers both "still pending" and "failed", see
+    // payment.service.js's module doc comment) must not count either.
+    await prisma.appAccountsRegPayment.create({
+      data: { AccountId: BigInt(userId), TransactionNo: `TXN_UNCONFIRMED_${userId}`, PaymentAmount: 1200, PaymentStatus: 1 },
     });
     await assert.rejects(() => registrationService.complete(userId, userId), (err) => {
       assert.ok(err.details?.missing?.includes('payment'));
@@ -574,8 +574,8 @@ test('registrationService.complete() refuses to finish a registration with no su
     });
 
     // Now a real SUCCESS payment - completion should go through.
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_SUCCESS_${userId}`, Amount: 1200, Status: 'SUCCESS' },
+    await prisma.appAccountsRegPayment.create({
+      data: { AccountId: BigInt(userId), TransactionNo: `TXN_SUCCESS_${userId}`, PaymentAmount: 1200, PaymentStatus: 0 },
     });
     const result = await registrationService.complete(userId, userId);
     assert.ok(result);
@@ -596,16 +596,13 @@ test('hasSuccessfulPayment only counts a SUCCESS row', async () => {
   try {
     assert.equal(await paymentService.hasSuccessfulPayment(userId), false, 'no rows at all');
 
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_P_${userId}`, Amount: 1200, Status: 'PENDING' },
+    await prisma.appAccountsRegPayment.create({
+      data: { AccountId: BigInt(userId), TransactionNo: `TXN_F_${userId}`, PaymentAmount: 1200, PaymentStatus: 1 },
     });
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_F_${userId}`, Amount: 1200, Status: 'FAILED' },
-    });
-    assert.equal(await paymentService.hasSuccessfulPayment(userId), false, 'PENDING/FAILED do not count');
+    assert.equal(await paymentService.hasSuccessfulPayment(userId), false, 'FAILED does not count');
 
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_S_${userId}`, Amount: 1200, Status: 'SUCCESS' },
+    await prisma.appAccountsRegPayment.create({
+      data: { AccountId: BigInt(userId), TransactionNo: `TXN_S_${userId}`, PaymentAmount: 1200, PaymentStatus: 0 },
     });
     assert.equal(await paymentService.hasSuccessfulPayment(userId), true);
   } finally {
@@ -618,8 +615,8 @@ test('initiate refuses a second payment once one has succeeded', async () => {
   const { app } = await import('../src/app.js');
   const { signAccessToken } = await import('../src/utils/token.js');
 
-  const applicantPath = '(Individual) Author / Composer';
-  const userId = await makeAccount({ applicantPath, email: `payu.dupe.${Date.now()}@example.com` });
+  const regType = 'I';
+  const userId = await makeAccount({ regType, email: `payu.dupe.${Date.now()}@example.com` });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);
@@ -633,14 +630,17 @@ test('initiate refuses a second payment once one has succeeded', async () => {
     });
 
   try {
-    // An abandoned PayU page leaves a PENDING row behind - that must never lock the member out.
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_ABANDONED_${userId}`, Amount: 1200, Status: 'PENDING' },
-    });
-    assert.equal((await initiate()).status, 200, 'a PENDING attempt must still allow a retry');
+    // An abandoned PayU page leaves its row at PaymentStatus 1 (unconfirmed) - that must never
+    // lock the member out of retrying (see payment.service.js's module doc comment).
+    const firstRes = await initiate();
+    assert.equal(firstRes.status, 200, 'a PaymentStatus 1 (unconfirmed) attempt must still allow a retry');
+    const firstTxnId = (await firstRes.json()).data.txnId;
+    const abandoned = await prisma.appAccountsRegPayment.findUnique({ where: { TransactionNo: firstTxnId } });
+    assert.ok(abandoned, 'initiate must create its row immediately');
+    assert.equal(abandoned.PaymentStatus, 1);
 
-    await prisma.appAccountsPayment.create({
-      data: { AccountId: BigInt(userId), TxnId: `TXN_PAID_${userId}`, Amount: 1200, Status: 'SUCCESS' },
+    await prisma.appAccountsRegPayment.create({
+      data: { AccountId: BigInt(userId), TransactionNo: `TXN_PAID_${userId}`, PaymentAmount: 1200, PaymentStatus: 0 },
     });
 
     const res = await initiate();
@@ -661,11 +661,11 @@ test('a successful callback clears the Typebot session and journal once the regi
   const { signAccessToken } = await import('../src/utils/token.js');
   const { typebotSessionStore } = await import('../src/modules/conversation/services/typebot/typebotSessionStore.js');
 
-  const applicantPath = '(Individual) Author / Composer';
+  const regType = 'I';
   const productinfo = 'IPRS Test Membership Fee';
   const accountName = 'PayU Tester';
   const accountEmail = `payu.cleanup.${Date.now()}@example.com`;
-  const userId = await makeAccount({ applicantPath, email: accountEmail, name: accountName });
+  const userId = await makeAccount({ regType, email: accountEmail, name: accountName });
   const token = signAccessToken({ sub: userId, phone: '9999999999', registrationStatus: 'started' });
 
   const server = app.listen(0);

@@ -9,6 +9,13 @@ import { logger } from '../../../utils/logger.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { createOcrProvider } from './ocr/ocrProvider.factory.js';
 import { paymentRepository } from '../../payment/repositories/payment.repository.js';
+import {
+  PUBLISHER_ROLL_TYPE_ID_BY_REG_TYPE,
+  resolveEntityType,
+  resolveRegType,
+  resolveRollTypeIds,
+} from './memberRoleCodes.js';
+import { languageLookupService } from './languageLookup.service.js';
 
 const REGISTERED = 1;
 const DOC_TYPES = Object.freeze({
@@ -66,7 +73,7 @@ const DOC_TYPES = Object.freeze({
 
 // Doc types that are OCR'd as a *different* type than they're stored under. Unlike the address
 // proofs - whose type comes from a preceding choice question, stashed per-session - this is static:
-// a company PAN is always OCR'd as a PAN (writing PANNo/Detail2), while the row keeps the honest
+// a company PAN is always OCR'd as a PAN (writing Detail2), while the row keeps the honest
 // COMPANY_PAN caption so a human reviewer can tell the two apart.
 // Exported because the conversation engine has to apply the same mapping when it labels the
 // OCR-confirmation card - it only knows the stored docType, and looking up COMPANY_PAN in
@@ -116,8 +123,9 @@ export const OCR_DOC_TYPES = [
 // Doc types whose OCR `name` is trustworthy enough to become AccountName. Address proofs are
 // excluded on purpose: an electricity bill or a rent letter routinely carries someone else's name.
 const IDENTITY_OCR_DOC_TYPES = [DOC_TYPES.PAN, DOC_TYPES.AADHAAR, DOC_TYPES.PASSPORT];
-// AppAccounts has no PAN/Aadhaar-number columns beyond PANNo, so only PAN is persisted;
-// Aadhaar OCR result is used for verification only. Bank OCR maps onto its existing columns.
+// AppAccounts has no dedicated PAN/Aadhaar-number columns at all - PAN goes to the generic
+// Detail2 column (which IPRS's real schema already has), and the Aadhaar OCR result is used for
+// verification only. Bank OCR maps onto its existing columns.
 const BANK_FIELD_MAP = { bankName: 'BankName', accountNumber: 'BankAcNo', ifsc: 'BankIFSCCode', branch: 'BankBranchName', micr: 'MicrCode' };
 // Which AppAccounts column an OCR-extracted `address` goes to, keyed by the upload slot (the
 // original docType, before any ocrDocType override). Base column = permanent/registered address,
@@ -134,12 +142,13 @@ const ADDRESS_COLUMN_BY_SLOT = {
 // mapped column name from being trusted blindly, even though the map only
 // ever contains these three today.
 const CONVERSATION_FIELDS = [
-  'GSTNo',
+  'Detail1', // GST number
+
   'AccountAlias',
   'AccountEmail',
   'PlaceOfBirth',
   'RollTypeIds',
-  'ApplicantPath',
+  'AccountRegType',
   'TeritoryAppFor',
   'Nationality',
   'AssociationName_India',
@@ -149,6 +158,7 @@ const CONVERSATION_FIELDS = [
   'ChanlDesc',
   'KindAttention1',
   'EntityType',
+  'LanguageName', // mother tongue - also resolves LanguageId, see saveConversationField
 ];
 
 const ocrProvider = createOcrProvider();
@@ -188,6 +198,21 @@ function assertOwnRegistration(userId, registrationId) {
   }
 }
 
+// App_Accounts_Doc.DocFileName was always left NULL by this app - prod actually uses it (confirmed
+// against mraai_uat: real rows hold the uploaded file's own name). The URL is a Typebot-generated
+// S3 key, not user-facing, so this pulls out just the last path segment. DocFileName is
+// NVarChar(100), so a long name is truncated rather than failing the write.
+function extractFileName(documentUrl) {
+  if (!documentUrl) return null;
+  try {
+    const path = new URL(documentUrl).pathname;
+    const name = decodeURIComponent(path.slice(path.lastIndexOf('/') + 1));
+    return name ? name.slice(0, 100) : null;
+  } catch {
+    return null;
+  }
+}
+
 // `ocrDocType` lets a caller run OCR under a different type than the one being saved on the row -
 // used for PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads, where the DB row stays generic
 // but the actual document might be a Driving Licence or Voter ID (see addressProofTypeMap.js).
@@ -210,6 +235,7 @@ async function saveDocument(userId, registrationId, docType, documentUrl, ocrDoc
     caption: docType,
     documentUrl,
     docStatus,
+    docFileName: extractFileName(documentUrl),
   });
 
   return toDocumentPublic(doc, ocrResult);
@@ -234,9 +260,34 @@ async function saveConversationField(userId, registrationId, field, value) {
     // Stored lowercase so "A@B.com" and "a@b.com" can't become two accounts regardless of the
     // column's collation - the unique index can only enforce what's actually written.
     update = { AccountEmail: normalizeEmail(trimmed) };
+  } else if (field === 'AccountRegType') {
+    // The answer text is not what goes in the column - IPRS's own code (I/NI/C/NC) is.
+    const regType = resolveRegType(trimmed);
+    if (!regType) return;
+    update = { AccountRegType: regType };
+    // The publisher paths never reach the role question, so their RollTypeIds is decided here.
+    const publisherRoll = PUBLISHER_ROLL_TYPE_ID_BY_REG_TYPE[regType];
+    if (publisherRoll) update.RollTypeIds = publisherRoll;
+  } else if (field === 'EntityType') {
+    // Their column is a 2-letter code (CP/PR/SP), not the answer text.
+    const entityType = resolveEntityType(trimmed);
+    if (!entityType) return;
+    update = { EntityType: entityType };
+  } else if (field === 'RollTypeIds') {
+    // Which ids the role maps to depends on the path chosen earlier (individual vs NRI), so the
+    // reg type has to be read back first. Without it there's nothing safe to write - better to
+    // skip than to store the answer text in a column that holds lookup ids.
+    const account = await registrationRepository.findByAccountId(registrationId);
+    const ids = resolveRollTypeIds(account?.AccountRegType, trimmed);
+    if (!ids) return;
+    update = { RollTypeIds: ids };
+  } else if (field === 'LanguageName') {
+    // Unlike RollTypeIds/EntityType/AccountRegType, this one really is free text - see
+    // languageLookup.service.js. The member's own words always get stored; LanguageId only on a
+    // confident match against IPRS's App_Language_Lookup, never guessed.
+    update = { LanguageName: trimmed, LanguageId: await languageLookupService.resolveLanguageId(trimmed) };
   } else {
     update = { [field]: trimmed };
-    if (field === 'GSTNo') update.Detail1 = trimmed;
   }
 
   await registrationRepository.update(registrationId, update);
@@ -327,7 +378,7 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl }));
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
-      await registrationRepository.update(registrationId, { PANNo: extracted.pan, Detail2: extracted.pan });
+      await registrationRepository.update(registrationId, { Detail2: extracted.pan });
     }
 
     // The member's name, taken from an identity document. This is the only name in the system with

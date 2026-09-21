@@ -113,12 +113,12 @@ test('filled fields appear, under the section a member would look in', async (t)
     AccountName: 'Arijit Singh',
     AccountAlias: 'Arijit',
     AccountEmail: 'member@example.invalid',
-    RollTypeIds: 'Composer',
-    ApplicantPath: '(Individual) Author / Composer',
+    RollTypeIds: '1', // Composer
+    AccountRegType: 'I',
     BankName: 'State Bank of India',
     BankAcNo: '1234567890',
     BankIFSCCode: 'SBIN0001234',
-    PANNo: 'ABCDE1234F',
+    Detail2: 'ABCDE1234F', // PAN
   });
 
   const sections = await registrationReviewService.buildReview(String(account.AccountId));
@@ -151,10 +151,11 @@ test('empty fields and empty sections are dropped, not shown blank', async (t) =
   assert.equal(/\|\s*$/m.test(body), false, 'no line has a blank value');
 });
 
-test('internal Detail columns never reach the member', async (t) => {
+test('Detail columns show under their real names, and internal ones never reach the member', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  // Detail1 = GST, Detail2 = PAN, Detail10 = a source tag. Printing the same value twice under a
-  // meaningless name makes a review harder to check, not easier.
+  // Detail1 = GST and Detail2 = PAN are real member-facing values (this app stores them there
+  // rather than adding columns of its own), so they belong in the review - but under those
+  // labels, never as "Detail1"/"Detail2". Detail10 is an internal source tag and must not leak.
   const account = await makeAccount({
     AccountName: 'Detail Test',
     Detail1: 'DETAIL1-SENTINEL',
@@ -165,8 +166,10 @@ test('internal Detail columns never reach the member', async (t) => {
   const sections = await registrationReviewService.buildReview(String(account.AccountId));
   const body = flatten(sections);
 
-  assert.equal(/SENTINEL/.test(body), false, 'a Detail column leaked into the review');
-  assert.equal(/Detail\d/.test(JSON.stringify(sections)), false);
+  assert.match(body, /GST number\|DETAIL1-SENTINEL/, 'GST must show under its own label');
+  assert.match(body, /PAN\|DETAIL2-SENTINEL/, 'PAN must show under its own label');
+  assert.equal(/DETAIL10-SENTINEL/.test(body), false, 'the internal source tag leaked');
+  assert.equal(/Detail\d/.test(JSON.stringify(sections)), false, 'a raw column name reached the member');
 });
 
 test('songs are listed with a count', async (t) => {

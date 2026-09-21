@@ -1,4 +1,14 @@
 -- ===================================================================
+-- SUPERSEDED - DO NOT RUN. Kept only because it documents the original fee bug below.
+--
+-- The answer this column was added for now goes into App_Accounts.AccountRegType instead, as
+-- IPRS's own I/NI/C/NC code - a column their production database already has and already uses for
+-- exactly this (confirmed against the live mraai_uat database: 794 accounts at 'I', 566 at 'C').
+-- See src/modules/registration/services/memberRoleCodes.js. The ApplicantPath column has been
+-- dropped; nothing reads or writes it any more.
+--
+-- Original description follows.
+--
 -- App_Accounts.ApplicantPath - which of the 4 fee-determining paths a member chose:
 --   (Individual) Author / Composer | (NRI) Author / Composer
 --   Owner/Publisher                | (NRI) Owner/Publisher
