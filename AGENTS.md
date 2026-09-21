@@ -72,10 +72,10 @@ src/
 │  ├─ auth/         services/otp/{interface,factory,mock,msg91} + tokenBlacklist.js
 │  ├─ user/         repository only - service/controller/routes/validators removed, unused
 │  │                (auth.service.js imports user.repository.js directly at login)
-│  ├─ registration/  controllers/services/repositories/validators + services/{ocr/*,registrationReview.service.js}
+│  ├─ registration/  controllers/services/repositories/validators + services/{ocr/*,verify/*,registrationReview.service.js}
 │  ├─ conversation/ services/{conversation.router,conversationJournal.service.js,emailOtpGate.js,
 │  │                typebot/typebotClient,typebotSessionStore,progressMap,documentTypeMap,
-│  │                addressProofTypeMap,conversationFieldMap,workLinkGate,paymentGate}.js
+│  │                addressProofTypeMap,conversationFieldMap,workLinkGate,paymentGate,verifyGate}.js
 │  │                + repositories/{conversationJournal.repository.js}
 │  │                + engines/{aiEngine,registrationEngine}.js
 │  ├─ work/         services/{workLinkResolver,musicCredits,youtube,gemini,workLink,workMatch}.service.js
@@ -404,10 +404,13 @@ into a column IPRS's real production schema already has, as the code their own s
 added earlier when those code meanings weren't yet known, have been dropped -
 `scripts/add-applicant-path-column.sql`/`add-entity-type-detail-column.sql` are marked superseded
 and must not be run. `AccountPassword` and `EntityType` were also narrowed back to match prod
-exactly (`NVarChar(100)`/`NVarChar(10)`, confirmed against `mraai_uat`). Two
-tables were added: `App_Accounts_ChatJournal` + `App_Accounts_Alias` (created by
-`scripts/add-chat-journal.sql`/`add-alias-table.sql`, models added to `schema.prisma` by hand — see
-"Resuming an abandoned registration"). Payments write to `App_Accounts_RegPayment` — IPRS's own
+exactly (`NVarChar(100)`/`NVarChar(10)`, confirmed against `mraai_uat`). One
+table was added: `App_Accounts_ChatJournal` (created by `scripts/add-chat-journal.sql`, model added
+to `schema.prisma` by hand — see "Resuming an abandoned registration"). A member's alias names live
+in `App_Accounts.AccountAlias` itself, comma-separated — `App_Accounts_Alias` was tried as a
+separate table first and reversed; `scripts/add-alias-table.sql` is marked superseded, and if it was
+ever created locally it's been dropped. See "Work links in the conversation flow" below. Payments
+write to `App_Accounts_RegPayment` — IPRS's own
 real registration-payment table (confirmed to already exist and be actively used in production,
 see `scripts/add-regpayment-table.sql`), not a table this app invented for itself (an earlier
 `App_Accounts_Payment` table/script is superseded). Email OTP verification state is **not** in the
@@ -729,14 +732,20 @@ a block id).
   links re-ask the step; nothing is written until the member confirms the song.
 - On confirm, `matchCredits()` (`workMatch.service.js`) checks the song's **`credits`** (every
   platform-reported name) against the member's names, split by evidentiary weight:
-  **trusted** = `AccountName` + `AccountAlias` (both on file before the member saw the credit list),
-  **claimed** = aliases the member typed at the work-link step *after* seeing the list. A trusted
-  match stores the link `verified`; a claimed match stores it unverified — being on the alias table
-  never promotes a name to trusted. If nothing matches, a synthetic `WORK_LINK_ALIAS_INPUT` asks
-  "what name are you credited under?"; `parseAliasList()` splits comma-separated names, they're
-  saved to `App_Accounts_Alias` (source `work-link`) so the next link matches without asking again,
-  and after `MAX_ALIAS_ATTEMPTS` (2) the song is saved unverified rather than wedging the member —
-  staff find these rows via `CreatedBy`.
+  **trusted** = `AccountName` + the first name on file in `AccountAlias` (both on file before the
+  member saw the credit list), **claimed** = every later name in `AccountAlias` (see below) - names
+  the member typed at the work-link step *after* seeing the list. A trusted match stores the link
+  `verified`; a claimed match stores it unverified — appending a name to `AccountAlias` never
+  promotes it to trusted, only position 0 counts as that. If nothing matches, a synthetic
+  `WORK_LINK_ALIAS_INPUT` asks "what name are you credited under?"; `parseAliasList()` splits
+  comma-separated names, `addAliases()` appends them to `AccountAlias` (case-insensitive dedup
+  against what's already there, and it stops adding once the column's own 200-char width would
+  overflow rather than truncating a name) so the next link matches without asking again, and after
+  `MAX_ALIAS_ATTEMPTS` (2) the song is saved unverified rather than wedging the member. `AccountAlias`
+  is the same column the flow's own stage-name/traderName question writes - that write always runs
+  first (fixed question order across all four paths), so it reliably occupies position 0 before any
+  work-link claim is appended; `getIdentityNames()` in `registration.service.js` is where this split
+  happens. There is no longer a separate alias table — see the Prisma note above.
 - Saving is `workLinkService.saveWorkLink()` (one `App_Accounts_WorkRegistration` row), hard-capped
   at `MAX_WORK_LINKS = 5` **in the service**, not just the gate — the cap still bites if a restarted
   conversation re-asks the step. `CreatedBy` is `'chat:name-matched'` or `'chat:name-unverified'`.
@@ -850,6 +859,46 @@ around it - a server restart just clears any pending OTP, the member requests a 
 `SMTP_USER`/`SMTP_PASSWORD` are optional in `envSchema` with no default; without them,
 `sendVerificationOtp()` fails with `'Failed to send email'` and the real email question re-asks —
 fill them in `.env` for actual delivery.
+
+## GST Verification
+
+Same "hard gate" pattern as the email-OTP and work-link steps, for a different reason: the GST
+number is a typed answer that needs checking against a government-lookup service before it's worth
+persisting at all, not a multi-turn sub-conversation like OTP. TAN verification is deliberately NOT
+built yet - no Studio question exists for it, and nothing here should be extended to TAN until
+asked for.
+
+`modules/registration/services/verify/` mirrors the OCR provider's interface+factory shape
+(`verifyProvider.interface.js`, `httpVerifyProvider.js`, `stubVerifyProvider.js`,
+`verifyProvider.factory.js`, selected by the existing `OCR_PROVIDER` env var — the verify endpoint
+lives on the same `ocr.choira.io` host as document OCR, so this isn't a second provider switch). The
+provider takes a typed `value`, not a `documentUrl`: `POST {OCR_API_BASE_URL}/api/verify/gstin`,
+body `{ gstin: value }`, response `{ success, verified, message, data }`.
+
+**Pass/fail rule (confirmed, not guessed): the response's TOP-LEVEL `success` field alone.** A live
+probe against a syntactically wrong GSTIN returned `{ success: true, verified: false, message:
+"Invalid GSTIN", data: null }` - so `verified` and everything under `data`
+(`gstin_status`/`gstin_checksum_valid`) are informational only and are never used to reject an
+answer. Only a genuine service/transport failure (network error, non-2xx, or the service's own
+`success: false`) blocks the member; that throws `VERIFY_REQUEST_FAILED`. Once `success` is true,
+the answer is treated as passed regardless of what the nested fields say.
+
+`modules/conversation/services/typebot/verifyGate.js` recognizes the GST question's `variableId`
+(`vqpmuqooo8wn2ktrfx9uf4l1j` — same id already mapped to `Detail1` in `conversationFieldMap.js`) and
+is wired into `registrationEngine.js`'s gate chain between the work-link and email gates. A fresh
+answer is checked before it's relayed to Typebot or persisted at all. On a service/transport failure,
+the same question is re-asked (`input: existing.input`, no `typebotSessionStore.set()` with a new
+input, no `continueChat` call — Typebot's session never advances, same guarantee as the email gate's
+failure path) with a message built from the service's own `message` field where present. Retries are
+unbounded — unlike OTP resends/email changes, a failed verify call has no side effect worth capping.
+Once the service responds successfully, the answer falls through unchanged to the normal
+relay/persist path, so GST's existing `Detail1` write is untouched.
+
+`env.VERIFY_ENABLED` (default `true`) is a blanket kill-switch for this whole gate — same
+shape/purpose as `OCR_ENABLED`. Set to `false` locally to test the chat flow past the GST step
+without a real, valid-format GSTIN on hand; when off, the step is never matched in
+`registrationEngine.js`, so the typed answer is saved unchecked, same as any other unguarded text
+field. Always `true` in production.
 
 ## Conventions to preserve
 

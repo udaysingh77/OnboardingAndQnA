@@ -51,6 +51,10 @@ export const ACCOUNT_FIELD_BY_VARIABLE_ID = {
   // stored as-is in LanguageName and, on a confident match, also resolved to IPRS's own
   // App_Language_Lookup.LanguageId - see languageLookup.service.js.
   vh4f2w089zbn113mboiqtm37f: 'LanguageName',
+  // "Please enter your Tax Residency Certificate (TRC) Number" - both NRI paths (Author/Composer
+  // and Owner/Publisher), asked right after the "Upload TRC" document step. Stored in TRCNo, a
+  // column IPRS's real schema already has (confirmed against mraai_uat) - no new column needed.
+  vub86kj2279m4imj3ri46ex4m: 'TRCNo',
 };
 
 export function resolveConversationField(variableId) {

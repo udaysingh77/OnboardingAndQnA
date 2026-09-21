@@ -1,4 +1,16 @@
 -- ===================================================================
+-- SUPERSEDED - DO NOT RUN. Kept only as a record of why this table briefly existed.
+--
+-- Decided against: a member's multiple names are now stored comma-separated in
+-- App_Accounts.AccountAlias itself (the same column the flow's stage-name question and the
+-- company path's traderName already write to) instead of a separate table. Position replaces the
+-- `Source` column below - the first comma-separated entry is whatever the flow wrote (trusted,
+-- same standing as AccountName), everything after it is a work-link claim (claimed, weaker
+-- evidence) - see registration.service.js's getIdentityNames()/addAliases(). If the table was
+-- already created locally, it has been dropped; nothing reads or writes App_Accounts_Alias anymore.
+--
+-- Original description follows.
+--
 -- App_Accounts_Alias - the names a member is credited under.
 --
 -- WHY A TABLE AND NOT A COLUMN: a member can be credited under several names (legal name, stage

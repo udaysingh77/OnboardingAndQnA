@@ -9,6 +9,7 @@
 // aren't specified; adjust here if it needs a different shape.
 // ==================================================================
 import { badRequestError } from '../../../shared/errors.js';
+import { env } from '../../../config/env.js';
 import { logger } from '../../../utils/logger.js';
 import { registrationService, OCR_TYPE_BY_DOC_TYPE } from '../../registration/services/registration.service.js';
 import { typebotClient, isDeadSessionError } from '../services/typebot/typebotClient.js';
@@ -56,6 +57,7 @@ import {
 } from '../services/emailOtpGate.js';
 import { isAddressProofTypeStep, resolveAddressProofOcrType, isManualAddressAnswer } from '../services/typebot/addressProofTypeMap.js';
 import { conversationJournalService, REPLAY_STOP } from '../services/conversationJournal.service.js';
+import { matchVerifyStep, verifyValue, describeVerifyFailure, describeVerifyError } from '../services/typebot/verifyGate.js';
 
 // Only these fields are shown to the user for confirmation (per doc type,
 // in this order) - see "Document Verification API" for the real OCR
@@ -804,6 +806,48 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
       input: WORK_LINK_CONFIRM_INPUT,
       progress: resolveProgress(existing.input.id),
     };
+  }
+
+  // The GST-number step is gated: a fresh answer is checked against the government-lookup verify
+  // service before it's relayed to Typebot or persisted at all. Only a genuine service/transport
+  // problem blocks it (see httpVerifyProvider.js's pass/fail rule) - on that failure the same
+  // question is re-asked (input: existing.input, no typebotSessionStore.set() with a new input, no
+  // continueChat call) so Typebot's session never advances mid-failure, same guarantee as the
+  // email-OTP gate below. Once the service responds successfully, `message` is unchanged and falls
+  // through to the normal relay/persist path further down - GST's existing Detail1 write keeps
+  // working exactly as before. See verifyGate.js.
+  //
+  // env.VERIFY_ENABLED (default true) is a blanket kill-switch, same shape/purpose as OCR_ENABLED:
+  // set to false locally to test the chat flow past this step without a real, valid-format GSTIN
+  // on hand. When off, the step is never matched, so the answer is saved unchecked - same as any
+  // other unguarded text field.
+  const verifyStep = env.VERIFY_ENABLED && existing?.input && message && matchVerifyStep(existing.input.options?.variableId);
+  if (verifyStep) {
+    let verifyResult;
+    try {
+      verifyResult = await verifyValue(verifyStep.docType, message);
+    } catch (err) {
+      logger.warn({ userId, docType: verifyStep.docType, err }, 'Verification call failed');
+      // err.details.message is the verify service's OWN reason (e.g. "That is not a valid GSTIN
+      // format.") when it responded with success:false - a real network/timeout failure has no
+      // body to carry one, so describeVerifyError falls back to generic wording in that case.
+      const reason = typeof err.details?.message === 'string' ? err.details.message : null;
+      return {
+        sessionEnded: false,
+        messages: [textMessage('verify-call-failed', describeVerifyError(verifyStep.label, reason))],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
+
+    if (!verifyResult.verified) {
+      return {
+        sessionEnded: false,
+        messages: [textMessage('verify-failed', describeVerifyFailure(verifyStep.label, verifyResult.message))],
+        input: existing.input,
+        progress: resolveProgress(existing.input.id),
+      };
+    }
   }
 
   // The email step is gated: a fresh answer to "Provide your email id"

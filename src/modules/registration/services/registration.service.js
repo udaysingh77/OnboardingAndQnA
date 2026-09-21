@@ -159,6 +159,7 @@ const CONVERSATION_FIELDS = [
   'KindAttention1',
   'EntityType',
   'LanguageName', // mother tongue - also resolves LanguageId, see saveConversationField
+  'TRCNo', // Tax Residency Certificate number (NRI paths)
 ];
 
 const ocrProvider = createOcrProvider();
@@ -174,13 +175,18 @@ async function getIdentityNames(userId) {
   const account = await registrationRepository.findByAccountId(userId);
   if (!account) throw notFoundError('User not found');
 
-  const aliases = await registrationRepository.findAliasesByAccountId(userId);
+  // AccountAlias may hold several comma-separated names by now (see addAliases). Position, not a
+  // Source column, is what makes them trusted or claimed: the first entry is whatever the flow's
+  // own stage-name/traderName question wrote (see conversationFieldMap.js), on file before the
+  // member ever saw a song's credits - the same standing as AccountName. Everything after it was
+  // added later via addAliases, i.e. a claim made *after* seeing the credits.
+  const [flowAlias, ...claimedAliases] = splitAliasList(account.AccountAlias);
 
   return {
     accountName: account.AccountName,
     accountAlias: account.AccountAlias,
-    trusted: [account.AccountName, account.AccountAlias].filter((name) => name?.trim()),
-    claimed: aliases.filter((row) => row.Source === ALIAS_SOURCES.WORK_LINK).map((row) => row.AliasName),
+    trusted: [account.AccountName, flowAlias].filter((name) => name?.trim()),
+    claimed: claimedAliases,
   };
 }
 
@@ -301,14 +307,18 @@ function normalizeEmail(value) {
 // this before sending an OTP (see registrationEngine.js) so a member is told the address is taken
 // instead of being walked through a verification that could never be saved. The filtered unique
 // index on App_Accounts(AccountEmail) is the actual guarantee; this is for the message.
-export const ALIAS_SOURCES = Object.freeze({ FLOW: 'flow', WORK_LINK: 'work-link', STAFF: 'staff' });
 
-// Bounds so a pasted paragraph can't fill the table. 200 is the AliasName column width.
+// Bounds on a single work-link "what are you credited under" answer, so a pasted paragraph can't
+// fill AccountAlias. MAX_ALIAS_LENGTH also protects the column itself (NVarChar(200)) from a lone
+// name that's too long to ever fit.
 const MAX_ALIASES_PER_TURN = 5;
 const MAX_ALIAS_LENGTH = 200;
+// AccountAlias's own column width - the hard ceiling on the comma-joined list as a whole, not just
+// one name. A table never needed this; a single column does.
+const ALIAS_COLUMN_MAX_LENGTH = 200;
 
-// Splits a free-text answer into individual names. The work-link step tells members they may give
-// more than one, separated by commas.
+// Splits a free-text answer into individual names, bounded to what a single turn may add. The
+// work-link step tells members they may give more than one, separated by commas.
 export function parseAliasList(value) {
   return String(value ?? '')
     .split(',')
@@ -317,18 +327,45 @@ export function parseAliasList(value) {
     .slice(0, MAX_ALIASES_PER_TURN);
 }
 
+// Splits AccountAlias back into the names already stored there - no per-turn cap, since the column
+// can hold more than MAX_ALIASES_PER_TURN once several turns have each added a few.
+function splitAliasList(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
 // Stores the names a member says they're credited under, so their next link matches without asking
-// again. Written to App_Accounts_Alias rather than AccountAlias: a member can have several names,
-// and that single column is already the target of the flow's own stage-name question *and* the
-// company path's traderName (see conversationFieldMap.js). Duplicates are dropped by the
-// (AccountId, AliasName) unique index. Returns how many were newly stored.
-async function addAliases(userId, names, source = ALIAS_SOURCES.WORK_LINK) {
+// again. Appended to AccountAlias itself (position matters - see getIdentityNames): the flow's own
+// stage-name/traderName question always runs first and plainly overwrites this column (see
+// conversationFieldMap.js/saveConversationField), so it occupies position 0 before any work-link
+// claim is appended here. Duplicates (case-insensitive) are skipped rather than re-added. Since the
+// column is NVarChar(200), not every name offered may fit - this stops adding once the joined list
+// would overflow, rather than truncating a name mid-word. Returns how many were newly stored.
+async function addAliases(userId, names) {
   const list = Array.isArray(names) ? names.map((n) => String(n ?? '').trim()).filter(Boolean) : parseAliasList(names);
   const bounded = [...new Set(list)].filter((n) => n.length <= MAX_ALIAS_LENGTH).slice(0, MAX_ALIASES_PER_TURN);
   if (bounded.length === 0) return 0;
 
-  const { count } = await registrationRepository.createAliases(userId, bounded, source);
-  return count;
+  const account = await registrationRepository.findByAccountId(userId);
+  const existing = splitAliasList(account?.AccountAlias);
+  const existingLower = new Set(existing.map((n) => n.toLowerCase()));
+
+  let merged = existing;
+  let added = 0;
+  for (const name of bounded) {
+    if (existingLower.has(name.toLowerCase())) continue;
+    const candidate = [...merged, name];
+    if (candidate.join(', ').length > ALIAS_COLUMN_MAX_LENGTH) break; // no more room
+    merged = candidate;
+    existingLower.add(name.toLowerCase());
+    added += 1;
+  }
+  if (added === 0) return 0;
+
+  await registrationRepository.update(userId, { AccountAlias: merged.join(', ') });
+  return added;
 }
 
 async function isEmailTakenByAnotherAccount(userId, email) {
@@ -519,7 +556,7 @@ export const registrationService = {
   isEmailTakenByAnotherAccount,
   addAliases,
   parseAliasList,
-  ALIAS_SOURCES,
+  splitAliasList,
   complete,
   DOC_TYPES,
 };
