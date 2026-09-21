@@ -16,6 +16,7 @@ import { notFoundError } from '../../../shared/errors.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { workRepository } from '../../work/repositories/work.repository.js';
 import { describeEntityType, describeRegType, describeRollTypeIds } from './memberRoleCodes.js';
+import { registrationService } from './registration.service.js';
 
 // Column -> what the member should see it called. Order within each section is the order shown.
 //
@@ -46,6 +47,7 @@ const SECTIONS = [
       ['EntityType', 'Entity type'],
       ['TeritoryAppFor', 'Territory'],
       ['Detail1', 'GST number'],
+      ['TRCNo', 'TRC number'],
       ['AssociationName_India', 'Member of another society'],
       ['KindAttention1', 'Designation'],
     ],
@@ -125,6 +127,11 @@ function formatValue(column, value) {
   if (column === 'RollTypeIds') return describeRollTypeIds(value);
   if (column === 'EntityType') return describeEntityType(value);
 
+  // AccountAlias may hold several comma-separated names (see registration.service.js's addAliases).
+  // "Stage name" shows only the first (the flow's own answer) - the rest render separately, under
+  // "Also credited as" below, same as they always have.
+  if (column === 'AccountAlias') return registrationService.splitAliasList(value)[0] ?? null;
+
   const text = String(value).trim();
   return text.length > 0 ? text : null;
 }
@@ -139,11 +146,13 @@ async function buildReview(userId) {
   const account = await registrationRepository.findByAccountId(userId);
   if (!account) throw notFoundError('Registration not found');
 
-  const [documents, works, aliases] = await Promise.all([
+  const [documents, works] = await Promise.all([
     registrationRepository.findDocumentsByAccountId(userId),
     workRepository.findByAccountId(userId),
-    registrationRepository.findAliasesByAccountId(userId),
   ]);
+  // Position 0 is already shown as "Stage name" above (see formatValue) - this section is
+  // everything claimed after it, i.e. the work-link additions.
+  const [, ...alsoCreditedAs] = registrationService.splitAliasList(account.AccountAlias);
 
   const sections = SECTIONS.map(({ title, fields }) => ({
     title,
@@ -170,10 +179,10 @@ async function buildReview(userId) {
     });
   }
 
-  if (aliases.length > 0) {
+  if (alsoCreditedAs.length > 0) {
     sections.push({
       title: 'Also credited as',
-      lines: aliases.map((row) => ({ label: null, value: row.AliasName })),
+      lines: alsoCreditedAs.map((name) => ({ label: null, value: name })),
     });
   }
 

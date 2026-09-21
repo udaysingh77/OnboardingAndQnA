@@ -94,6 +94,13 @@ const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v !== 'false'),
+  // Blanket kill-switch for the GST verify gate (independent of OCR_ENABLED) - flip to false to
+  // test the chat flow past the GST step without needing a real, valid-format GSTIN on hand.
+  // Mirrors OCR_ENABLED's exact shape/reasoning.
+  VERIFY_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
 
   TYPEBOT_API_BASE_URL: z.string().default('https://typebot.io'),
   // The bot's internal id (preview mode) or publicId (once published) - see TYPEBOT_PREVIEW_MODE.
