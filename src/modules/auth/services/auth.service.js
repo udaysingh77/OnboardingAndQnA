@@ -48,6 +48,7 @@ export function createAuthService({ otpProvider = createOtpProvider() } = {}) {
         user = await userRepository.create({
           AccountGroupId: 0,
           AccountMobile: canonicalPhone,
+          AccountType: 'C',
         });
       } catch (err) {
         // Two verify requests for the same new number can both miss the lookup above and race to

@@ -107,12 +107,12 @@ async function startAtGstStep() {
 
 const say = (userId, message) => handle({ userId, token: 'test-token', message });
 
-// env.VERIFY_ENABLED is read from the ambient .env (frozen at process start, can't be monkey-
+// env.GST_VERIFY_ENABLED is read from the ambient .env (frozen at process start, can't be monkey-
 // patched here) - a developer testing locally with it set to false gets these skipped rather than
 // a false failure. See the dedicated "gate bypassed" test below for that state instead.
 test('verified: true relays through and persists Detail1', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (!env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is false - gate is bypassed locally');
+  if (!env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is false - gate is bypassed locally');
   verifyProvider.verify = async () => ({ verified: true, message: 'ok' });
   const { account, userId } = await startAtGstStep();
 
@@ -125,7 +125,7 @@ test('verified: true relays through and persists Detail1', async (t) => {
 
 test('verified: false stays on the same step and never persists the bad value', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (!env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is false - gate is bypassed locally');
+  if (!env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is false - gate is bypassed locally');
   verifyProvider.verify = async () => ({ verified: false, message: 'GSTIN not found' });
   const { account, userId } = await startAtGstStep();
 
@@ -139,7 +139,7 @@ test('verified: false stays on the same step and never persists the bad value', 
 
 test('a provider error also stays on the same step, with a distinct message', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (!env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is false - gate is bypassed locally');
+  if (!env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is false - gate is bypassed locally');
   verifyProvider.verify = async () => {
     throw new Error('ECONNREFUSED');
   };
@@ -151,7 +151,7 @@ test('a provider error also stays on the same step, with a distinct message', as
 
 test('a provider error carrying the service\'s own reason (details.message) surfaces it to the member', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (!env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is false - gate is bypassed locally');
+  if (!env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is false - gate is bypassed locally');
   verifyProvider.verify = async () => {
     const err = new Error('That is not a valid GSTIN format.');
     err.details = { stage: 'verify_call', docType: 'GSTIN', message: 'That is not a valid GSTIN format.', code: 'GSTIN_MALFORMED' };
@@ -168,7 +168,7 @@ test('a provider error carrying the service\'s own reason (details.message) surf
 
 test('retries are unbounded: several failures then a success still works', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (!env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is false - gate is bypassed locally');
+  if (!env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is false - gate is bypassed locally');
   const { account, userId } = await startAtGstStep();
 
   verifyProvider.verify = async () => ({ verified: false, message: 'no' });
@@ -185,16 +185,16 @@ test('retries are unbounded: several failures then a success still works', async
   assert.equal(saved.Detail1, '08AKWPJ1234H1ZN');
 });
 
-// --- VERIFY_ENABLED=false: the gate is bypassed entirely, mirroring OCR_ENABLED -----------------
+// --- GST_VERIFY_ENABLED=false: the gate is bypassed entirely, mirroring OCR_ENABLED -----------------
 
-test('with VERIFY_ENABLED off, a malformed value advances anyway and is persisted unchecked', async (t) => {
+test('with GST_VERIFY_ENABLED off, a malformed value advances anyway and is persisted unchecked', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
-  if (env.VERIFY_ENABLED) return t.skip('VERIFY_ENABLED is true here - see the gated tests above instead');
+  if (env.GST_VERIFY_ENABLED) return t.skip('GST_VERIFY_ENABLED is true here - see the gated tests above instead');
 
   // Never called when the gate is bypassed - throwing proves it, same technique as the other
   // "provider error" tests but inverted: this must NOT surface as a block.
   verifyProvider.verify = async () => {
-    throw new Error('verifyProvider.verify should not be called when VERIFY_ENABLED is false');
+    throw new Error('verifyProvider.verify should not be called when GST_VERIFY_ENABLED is false');
   };
   const { account, userId } = await startAtGstStep();
 

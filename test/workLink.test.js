@@ -28,12 +28,16 @@ import { workLinkService, MAX_WORK_LINKS, MATCH_MARKERS } from '../src/modules/w
 import {
   confirmsSong,
   wantsAnotherLink,
+  isMoveOnKeyword,
   describeSong,
   describeCredits,
   isWorkLinkStep,
   WORK_URL_VARIABLE_ID,
   MAX_ALIAS_ATTEMPTS,
 } from '../src/modules/conversation/services/typebot/workLinkGate.js';
+import { typebotSessionStore } from '../src/modules/conversation/services/typebot/typebotSessionStore.js';
+import { typebotClient } from '../src/modules/conversation/services/typebot/typebotClient.js';
+import { handle } from '../src/modules/conversation/engines/registrationEngine.js';
 
 // --- the gate's vocabulary (pure) ------------------------------------------
 
@@ -50,6 +54,15 @@ test('confirmation answers', () => {
 test('add-another answers', () => {
   for (const yes of ['Yes, add another', 'yes', 'add another']) assert.equal(wantsAnotherLink(yes), true, yes);
   for (const no of ['No, continue', 'no', '']) assert.equal(wantsAnotherLink(no), false, no);
+});
+
+test('move-on answers (the duplicate-link message\'s button)', () => {
+  for (const yes of ['No, move on', 'no', 'move on', 'skip']) assert.equal(isMoveOnKeyword(yes), true, yes);
+  // A real link (or anything else) must NOT be read as "move on" - it has to fall through and be
+  // resolved as a fresh link paste, not silently discarded.
+  for (const notMoveOn of ['https://open.spotify.com/track/abc', 'yes', '']) {
+    assert.equal(isMoveOnKeyword(notMoveOn), false, notMoveOn);
+  }
 });
 
 test('the song card shows only fields the provider actually returned', () => {
@@ -302,6 +315,39 @@ test(`the cap holds at ${MAX_WORK_LINKS} - the next link is refused, not silentl
   assert.equal(await workLinkService.countWorkLinks(userId), MAX_WORK_LINKS, 'nothing extra was written');
 });
 
+// --- duplicate-link check ----------------------------------------------------
+
+test('the same link cannot be added twice for one member - the second attempt is refused', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  const first = await workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(1), matched: true });
+  assert.ok(first, 'the first save succeeds');
+
+  await assert.rejects(
+    () => workLinkService.saveWorkLink({ userId, resolved: spotifyTrack(1), matched: true }),
+    (err) => {
+      assert.equal(err.errorCode, 'WORK_LINK_DUPLICATE');
+      assert.equal(err.statusCode, 409);
+      return true;
+    },
+  );
+
+  assert.equal(await workLinkService.countWorkLinks(userId), 1, 'the rejected duplicate did not count against the cap');
+});
+
+test('the same link IS allowed for two different members - the check is per-account', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userA = await makeAccount();
+  const userB = await makeAccount();
+
+  const rowA = await workLinkService.saveWorkLink({ userId: userA, resolved: spotifyTrack(1), matched: true });
+  const rowB = await workLinkService.saveWorkLink({ userId: userB, resolved: spotifyTrack(1), matched: true });
+
+  assert.ok(rowA);
+  assert.ok(rowB);
+});
+
 test('over-long values are clipped to the column width instead of failing the insert', async (t) => {
   if (!dbAvailable) return t.skip('SQL Server is not reachable');
   const userId = await makeAccount();
@@ -383,4 +429,67 @@ test('clearWorkLinks never touches another member', async (t) => {
 
   assert.equal(await workLinkService.countWorkLinks(userA), 0);
   assert.equal(await workLinkService.countWorkLinks(userB), 1, "someone else's restart must not touch this");
+});
+
+// --- the "No, move on" button on the duplicate-link message -----------------
+// End-to-end through handle(), driven from a pendingWorkLinkDuplicate session state directly
+// (rather than re-simulating the whole song-confirm/alias flow that produces it) - this isolates
+// exactly the new code path: does the button bypass/replay, and does anything else still fall
+// through as a fresh link-paste attempt instead of getting silently swallowed?
+
+const WORK_URL_INPUT = { id: 'work-url-block', type: 'url input', options: { variableId: WORK_URL_VARIABLE_ID } };
+
+test('tapping "No, move on" bypasses and replays the duplicate link to Typebot - session advances', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+  const duplicateUrl = 'https://open.spotify.com/track/already-added';
+
+  typebotSessionStore.set(userId, {
+    sessionId: 'fake-session',
+    input: WORK_URL_INPUT,
+    pendingWorkLinkDuplicate: { url: duplicateUrl },
+  });
+
+  let continueChatMessage;
+  const originalContinueChat = typebotClient.continueChat;
+  typebotClient.continueChat = async ({ message }) => {
+    continueChatMessage = message;
+    return { sessionId: 'fake-session', messages: [], input: { id: 'next-block', type: 'text input' } };
+  };
+
+  try {
+    const res = await handle({ userId, token: 'test-token', message: 'No, move on' });
+    assert.equal(continueChatMessage?.text, duplicateUrl, 'the duplicate link was replayed to advance Typebot');
+    assert.equal(res.input?.id, 'next-block', 'the conversation advanced past the work-link step');
+  } finally {
+    typebotClient.continueChat = originalContinueChat;
+  }
+});
+
+test('ignoring the button and sending anything else falls through - the flow is not blocked', async (t) => {
+  if (!dbAvailable) return t.skip('SQL Server is not reachable');
+  const userId = await makeAccount();
+
+  typebotSessionStore.set(userId, {
+    sessionId: 'fake-session',
+    input: WORK_URL_INPUT,
+    pendingWorkLinkDuplicate: { url: 'https://open.spotify.com/track/already-added' },
+  });
+
+  const originalContinueChat = typebotClient.continueChat;
+  typebotClient.continueChat = async () => {
+    throw new Error('continueChat should not be called - an unresolved link must stay on this step, not advance');
+  };
+
+  try {
+    // Not the move-on keyword, and not a real Spotify/YouTube link either - the same "please share
+    // a link" retry an ordinary unrecognised paste gets, proving the duplicate state doesn't trap
+    // the member on some other message instead.
+    const res = await handle({ userId, token: 'test-token', message: 'not a link at all' });
+    assert.equal(res.input?.id, 'work-url-block', 'still parked on the work-link question, not stuck elsewhere');
+    const text = res.messages[0].content.richText[0].children[0].text ?? JSON.stringify(res.messages[0]);
+    assert.match(text, /Spotify or YouTube/);
+  } finally {
+    typebotClient.continueChat = originalContinueChat;
+  }
 });

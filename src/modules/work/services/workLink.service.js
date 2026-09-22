@@ -28,6 +28,7 @@
 // ==================================================================
 import { workRepository } from '../repositories/work.repository.js';
 import { matchCredits } from './workMatch.service.js';
+import { appError } from '../../../shared/errors.js';
 
 // How many links one member may add. Enforced here rather than only in the conversation gate so it
 // holds even if the member re-enters the link step in a restarted conversation - the flow can ask
@@ -62,10 +63,18 @@ function clip(value, max) {
 // `resolved` is workLinkResolver's provider-agnostic shape. `memberNames` is every name already
 // tried against this song's credits (trusted + claimed, or the alias just given) - it decides
 // whether the writer columns below get filled, not just whether the row is saved at all.
-// Returns the created row, or null when the member is already at the cap.
+// Returns the created row, or null when the member is already at the cap. Throws (errorCode
+// WORK_LINK_DUPLICATE) when this exact link is already saved for this member - enforced here, not
+// only in the conversation gate, for the same reason as the cap above: it must hold even if the
+// member re-enters the link step in a restarted conversation.
 async function saveWorkLink({ userId, resolved, matched, memberNames = [] }) {
   const existing = await countWorkLinks(userId);
   if (existing >= MAX_WORK_LINKS) return null;
+
+  const digitalLink = clip(resolved?.url, LIMITS.DigitalLink);
+  if (digitalLink && await workRepository.existsByAccountIdAndDigitalLink(userId, digitalLink)) {
+    throw appError("You've already added this song.", { statusCode: 409, errorCode: 'WORK_LINK_DUPLICATE' });
+  }
 
   const artists = Array.isArray(resolved?.artists) ? resolved.artists.filter(Boolean) : [];
 
@@ -77,7 +86,7 @@ async function saveWorkLink({ userId, resolved, matched, memberNames = [] }) {
     Publisher: clip(resolved?.publisher, LIMITS.Publisher),
     Author_Composer: writerCredit(resolved?.composers, memberNames, LIMITS.Author_Composer),
     Author_Lyricist: writerCredit(resolved?.lyricists, memberNames, LIMITS.Author_Lyricist),
-    DigitalLink: clip(resolved?.url, LIMITS.DigitalLink),
+    DigitalLink: digitalLink,
     ReleaseYear: Number.isInteger(resolved?.releaseYear) ? BigInt(resolved.releaseYear) : null,
     CreatedBy: matched ? MATCH_MARKERS.MATCHED : MATCH_MARKERS.UNVERIFIED,
   });

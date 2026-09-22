@@ -3,12 +3,13 @@
 // and for the Typebot-driven, section-based registration flow.
 // Status is derived from App_Accounts.ApplicationStatus (1 = done).
 // ==================================================================
-import { badRequestError, forbiddenError, notFoundError } from '../../../shared/errors.js';
+import { appError, badRequestError, forbiddenError, notFoundError } from '../../../shared/errors.js';
 import { env } from '../../../config/env.js';
 import { logger } from '../../../utils/logger.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { createOcrProvider } from './ocr/ocrProvider.factory.js';
 import { paymentRepository } from '../../payment/repositories/payment.repository.js';
+import { workMatchService } from '../../work/services/workMatch.service.js';
 import {
   PUBLISHER_ROLL_TYPE_ID_BY_REG_TYPE,
   resolveEntityType,
@@ -16,6 +17,7 @@ import {
   resolveRollTypeIds,
 } from './memberRoleCodes.js';
 import { languageLookupService } from './languageLookup.service.js';
+import { DOC_LOOKUP_ID_BY_PATH } from './documentLookupMap.js';
 
 const REGISTERED = 1;
 const DOC_TYPES = Object.freeze({
@@ -162,7 +164,9 @@ const CONVERSATION_FIELDS = [
   'TRCNo', // Tax Residency Certificate number (NRI paths)
 ];
 
-const ocrProvider = createOcrProvider();
+// Exported (not just a local const) so tests can swap ocrProvider.extract, same technique
+// verifyGate.js's verifyProvider export uses.
+export const ocrProvider = createOcrProvider();
 
 // The names a song's credits are checked against, split by how much they're worth as evidence.
 //
@@ -219,6 +223,51 @@ function extractFileName(documentUrl) {
   }
 }
 
+// AccountRegType I/NI/NC map straight to a Doc_LookUp path key; C additionally needs EntityType,
+// since IPRS's Doc_LookUp has separate document sets per entity type (Sole Proprietor/Partnership/
+// Corporate) - see documentLookupMap.js. Returns null when there isn't yet a confident path (e.g.
+// the entity-type question hasn't been answered).
+export function resolveDocPathKey(account) {
+  const regType = account.AccountRegType;
+  if (regType === 'C') {
+    if (account.EntityType === 'SP') return 'C_SP';
+    if (account.EntityType === 'PR') return 'C_PR';
+    if (account.EntityType === 'CP') return 'C_CP';
+    return null;
+  }
+  return ['I', 'NI', 'NC'].includes(regType) ? regType : null;
+}
+
+// MRU_<AccountId>_<DocumentLookupId>_N1_<filename> - IPRS's own DocFileName convention (confirmed
+// against mraai_uat). Only applied when a real DocumentLookupId was resolved; otherwise this is the
+// same plain filename extractFileName() alone would produce (today's unchanged fallback). The
+// prefix competes with extractFileName's own 100-char slice for the NVarChar(100) budget, so the
+// filename is truncated by however much room the prefix actually used, not by a fixed guess.
+export function buildDocFileName(accountId, documentLookupId, documentUrl) {
+  const plain = extractFileName(documentUrl);
+  if (!plain || documentLookupId == null) return plain;
+
+  const prefix = `MRU_${accountId}_${documentLookupId}_N1_`;
+  const budget = 100 - prefix.length;
+  if (budget <= 0) return plain.slice(0, 100);
+
+  return prefix + plain.slice(0, budget);
+}
+
+// AppAccounts.AccountImage is NVarChar(100) - too short for a real photo URL, so this mirrors
+// prod's own convention (confirmed against mraai_uat) instead of a truncated, broken link. The
+// actual openable URL stays in App_Accounts_Doc.DocumentCaption, untouched.
+export function buildAccountImagePath(accountId, documentUrl) {
+  const plain = extractFileName(documentUrl);
+  if (!plain) return null;
+
+  const prefix = `MemberPhoto/MPU_${accountId}_`;
+  const budget = 100 - prefix.length;
+  if (budget <= 0) return plain.slice(0, 100);
+
+  return prefix + plain.slice(0, budget);
+}
+
 // `ocrDocType` lets a caller run OCR under a different type than the one being saved on the row -
 // used for PERMANENT_ADDRESS_PROOF/CURRENT_ADDRESS_PROOF uploads, where the DB row stays generic
 // but the actual document might be a Driving Licence or Voter ID (see addressProofTypeMap.js).
@@ -236,13 +285,23 @@ async function saveDocument(userId, registrationId, docType, documentUrl, ocrDoc
   // DocStatus: 0 = no OCR attempted (NOC/COMPANY_DOC/PROFILE_PHOTO), 1 = OCR-verified, 2 = OCR failed.
   const docStatus = ocrResult ? (ocrResult.verified ? 1 : 2) : 0;
 
+  const pathKey = resolveDocPathKey(account);
+  const documentLookupId = pathKey ? DOC_LOOKUP_ID_BY_PATH[pathKey]?.[docType] ?? null : null;
+
   const doc = await registrationRepository.upsertDocument({
     accountId: registrationId,
     caption: docType,
     documentUrl,
     docStatus,
-    docFileName: extractFileName(documentUrl),
+    documentLookupId,
+    docFileName: buildDocFileName(registrationId, documentLookupId, documentUrl),
   });
+
+  if (docType === DOC_TYPES.PROFILE_PHOTO) {
+    await registrationRepository.update(registrationId, {
+      AccountImage: buildAccountImagePath(registrationId, documentUrl),
+    });
+  }
 
   return toDocumentPublic(doc, ocrResult);
 }
@@ -410,9 +469,37 @@ export function normalizeExtracted(docType, extracted) {
   };
 }
 
+// Reuses the same first+last-token matching workMatchService.matchCredits already uses for
+// work-link credit matching (tolerates OCR noise - dropped middle names, initials, one-character
+// typos) instead of a bespoke matcher, since it's an already-proven "is this plausibly the same
+// person" check.
+function identityNameMatches(existingName, extractedName) {
+  return workMatchService.matchCredits({ credits: [extractedName] }, [existingName]).matched;
+}
+
 async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlot) {
   try {
     const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl }));
+    const account = await registrationRepository.findByAccountId(registrationId);
+
+    // A member could upload their own PAN, then a different person's Aadhaar/Passport - nothing
+    // used to check the second identity document's name against the first. Block outright: nothing
+    // from this document (not just the name) is trustworthy once the name doesn't match, so this
+    // throws before any of the writes below run. IDENTITY_NAME_CHECK_ENABLED mirrors OCR_ENABLED/
+    // GST_VERIFY_ENABLED's kill-switch shape, for local testing with mismatched dummy documents.
+    if (env.IDENTITY_NAME_CHECK_ENABLED && IDENTITY_OCR_DOC_TYPES.includes(docType) && extracted.name) {
+      const existingName = account?.AccountName?.trim();
+      if (existingName && !identityNameMatches(existingName, extracted.name)) {
+        logger.warn(
+          { registrationId, docType, existingName, extractedName: extracted.name },
+          'Identity document name does not match the account - refusing to save',
+        );
+        throw appError(
+          "The name on this document doesn't match the name already on your account. Please make sure every document you upload belongs to you.",
+          { statusCode: 400, errorCode: 'IDENTITY_NAME_MISMATCH' },
+        );
+      }
+    }
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
       await registrationRepository.update(registrationId, { Detail2: extracted.pan });
@@ -426,11 +513,8 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     // was previously left unpersisted because OCR-formatted text could clobber a real name already
     // on the row. Restricted to identity documents too - an electricity bill's name is often a
     // landlord's or a parent's, which is evidence of nothing.
-    if (IDENTITY_OCR_DOC_TYPES.includes(docType) && extracted.name) {
-      const account = await registrationRepository.findByAccountId(registrationId);
-      if (!account?.AccountName?.trim()) {
-        await registrationRepository.update(registrationId, { AccountName: String(extracted.name).trim().slice(0, 100) });
-      }
+    if (IDENTITY_OCR_DOC_TYPES.includes(docType) && extracted.name && !account?.AccountName?.trim()) {
+      await registrationRepository.update(registrationId, { AccountName: String(extracted.name).trim().slice(0, 100) });
     }
 
     if (docType === DOC_TYPES.BANK) {
@@ -468,6 +552,10 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     // persisted to AppAccounts - only used here to compute `verified`.
     return { verified: Boolean(extracted.isValid), extracted };
   } catch (err) {
+    // A name-mismatch is a genuine rejection, not a soft "couldn't read it" failure - let it
+    // propagate to saveDocument()'s caller instead of being logged-and-swallowed below.
+    if (err.errorCode === 'IDENTITY_NAME_MISMATCH') throw err;
+
     logger.warn(
       { registrationId, docType, stage: err.details?.stage, details: err.details, err },
       'OCR extraction failed, document saved unverified',

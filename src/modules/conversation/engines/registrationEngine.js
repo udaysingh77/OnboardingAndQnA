@@ -20,6 +20,7 @@ import {
   isWorkLinkStep,
   confirmsSong,
   wantsAnotherLink,
+  isMoveOnKeyword,
   describeSong,
   describeCredits,
   MAX_WORK_LINKS,
@@ -199,8 +200,20 @@ const OCR_CONFIRM_CHOICE_INPUT = {
 };
 
 // Synthetic block for the email-OTP step - not a real Typebot block, Studio
-// needs no changes (same non-Typebot-block pattern as OCR_CONFIRM_CHOICE_INPUT).
-const EMAIL_OTP_INPUT = { id: 'email-otp-verification', type: 'text input', options: {} };
+// needs no changes (same non-Typebot-block pattern as OCR_CONFIRM_CHOICE_INPUT). Stays a "text
+// input" so the frontend keeps rendering the free-text composer (needed to type the OTP digits),
+// but also carries `items` so the frontend can additionally show Resend/Change as tappable buttons
+// - see Iprs-chatbot's Chat.jsx. The button labels are chosen to already match
+// isResendKeyword/isChangeEmailKeyword below, so a tap and a typed keyword hit the same matcher.
+const EMAIL_OTP_INPUT = {
+  id: 'email-otp-verification',
+  type: 'text input',
+  options: {},
+  items: [
+    { id: 'email-otp-resend', content: 'Resend OTP' },
+    { id: 'email-otp-change', content: 'Change email' },
+  ],
+};
 
 // Offered to a member who left a registration unfinished and came back. Synthetic, same pattern as
 // the two above.
@@ -281,6 +294,19 @@ async function saveAndOfferAnother({ userId, existing, resolved, trust, note, me
     });
     count = await workLinkService.countWorkLinks(userId);
   } catch (err) {
+    if (err.errorCode === 'WORK_LINK_DUPLICATE') {
+      typebotSessionStore.set(userId, {
+        sessionId: existing.sessionId,
+        input: existing.input,
+        pendingWorkLinkDuplicate: { url: resolved.url },
+      });
+      return {
+        sessionEnded: false,
+        messages: [textMessage('work-link-duplicate', 'You\'ve already added that song. Please share a different link, or tap "No, move on" to continue.')],
+        input: { ...existing.input, items: [{ id: 'work-link-move-on', content: 'No, move on' }] },
+        progress: resolveProgress(existing.input.id),
+      };
+    }
     // A storage failure must not strand the member on this step - log it and let the conversation
     // move on, same stance as the OCR persistence path.
     logger.warn({ userId, err }, 'Failed to save work link, advancing without the loop');
@@ -771,6 +797,22 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
     message = lastUrl;
   }
 
+  // Resolve a pending duplicate-link notice. Unlike pendingWorkLinkChoice above, this step keeps
+  // the real url-input block active (with a "No, move on" button attached, not a synthetic choice
+  // input) so the member can still paste a fresh link directly - only the exact move-on keyword
+  // bypasses/replays; anything else (including a real link) falls through unchanged into the
+  // normal isWorkLinkStep resolution below, exactly as if the duplicate had never happened.
+  if (existing?.pendingWorkLinkDuplicate && message !== undefined) {
+    const { url } = existing.pendingWorkLinkDuplicate;
+    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input: existing.input });
+    existing = typebotSessionStore.get(userId);
+
+    if (isMoveOnKeyword(message)) {
+      bypassWorkLinkSave = true;
+      message = url;
+    }
+  }
+
   // Work links: the member may claim up to MAX_WORK_LINKS songs, but the flow asks once. Everything
   // between the paste and the save is driven from here with synthetic blocks (see workLinkGate.js):
   // identify the provider, fetch the song, show it back for confirmation, and - when the credits
@@ -817,11 +859,11 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
   // through to the normal relay/persist path further down - GST's existing Detail1 write keeps
   // working exactly as before. See verifyGate.js.
   //
-  // env.VERIFY_ENABLED (default true) is a blanket kill-switch, same shape/purpose as OCR_ENABLED:
-  // set to false locally to test the chat flow past this step without a real, valid-format GSTIN
-  // on hand. When off, the step is never matched, so the answer is saved unchecked - same as any
-  // other unguarded text field.
-  const verifyStep = env.VERIFY_ENABLED && existing?.input && message && matchVerifyStep(existing.input.options?.variableId);
+  // env.GST_VERIFY_ENABLED (default true) is a blanket kill-switch, same shape/purpose as
+  // OCR_ENABLED: set to false locally to test the chat flow past this step without a real,
+  // valid-format GSTIN on hand. When off, the step is never matched, so the answer is saved
+  // unchecked - same as any other unguarded text field.
+  const verifyStep = env.GST_VERIFY_ENABLED && existing?.input && message && matchVerifyStep(existing.input.options?.variableId);
   if (verifyStep) {
     let verifyResult;
     try {
@@ -1142,7 +1184,20 @@ async function handleUploadCore({ userId, token, file }) {
 
   let result = null;
   if (docType) {
-    result = await registrationService.saveDocument(userId, userId, docType, fileUrl, ocrDocType);
+    try {
+      result = await registrationService.saveDocument(userId, userId, docType, fileUrl, ocrDocType);
+    } catch (err) {
+      if (err.errorCode === 'IDENTITY_NAME_MISMATCH') {
+        logger.warn({ userId, docType }, 'Identity document name mismatch - re-asking for the same document');
+        return {
+          sessionEnded: false,
+          messages: [textMessage('identity-name-mismatch', err.message)],
+          input: session.input,
+          progress: resolveProgress(session.input.id),
+        };
+      }
+      throw err;
+    }
   }
 
   // OCR was attempted (result carries an `extracted` key, even if null) -
