@@ -27,10 +27,13 @@ export function isValidEmail(value) {
 export const sendVerificationOtp = (email) => emailOtpService.sendEmailOtp({ email });
 export const verifyVerificationOtp = (email, otp) => emailOtpService.verifyEmailOtp({ email, otp });
 
-// --- What the member may type at the OTP step ------------------------------
+// --- What the member may type (or tap) at the OTP step ----------------------
 //
-// The OTP field is a plain text input, so the two escapes are keywords rather than buttons - no
-// frontend change, and the same mechanism `resend` has always used.
+// The frontend now also shows "Resend OTP"/"Change email" as buttons (registrationEngine.js's
+// EMAIL_OTP_INPUT), but a button tap arrives here exactly like typed text - sendAnswer() posts the
+// button's own label as the message. These keyword lists are what actually decide the match, so
+// they cover both the button labels and the typed phrasings members already used before the
+// buttons existed.
 
 function normalize(message) {
   return String(message ?? '').trim().toLowerCase();
@@ -53,11 +56,11 @@ export function isChangeEmailKeyword(message) {
 export const MAX_EMAIL_CHANGES = 3;
 
 export function describeOtpSent(email) {
-  return `We've sent a 4-digit OTP to ${email}. Enter it to verify, type "resend" for a new code, or type "change" to use a different email address.`;
+  return `We've sent a 4-digit OTP to ${email}. Enter it to verify, or tap Resend OTP for a new code, or Change email to use a different address.`;
 }
 
 export function describeOtpProblem(reason) {
-  return `${reason} Type "resend" for a new code, or "change" to use a different email address.`;
+  return `${reason} Tap Resend OTP for a new code, or Change email to use a different address.`;
 }
 
 export function describeChangeLimitReached() {

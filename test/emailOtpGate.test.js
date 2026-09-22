@@ -59,6 +59,16 @@ test('change keywords are recognised and do not collide with resend', () => {
   assert.equal(isChangeEmailKeyword('1234'), false);
 });
 
+test('the EMAIL_OTP_INPUT button labels hit the same matchers as the typed keywords', () => {
+  // registrationEngine.js's EMAIL_OTP_INPUT.items carries these exact strings as button content -
+  // sendAnswer() posts a tapped button's label back as plain text, so a click and a typed keyword
+  // must resolve identically here.
+  assert.equal(isResendKeyword('Resend OTP'), true);
+  assert.equal(isChangeEmailKeyword('Change email'), true);
+  assert.equal(isChangeEmailKeyword('Resend OTP'), false);
+  assert.equal(isResendKeyword('Change email'), false);
+});
+
 test('email format check', () => {
   assert.equal(isValidEmail('a@b.co'), true);
   for (const bad of ['a@b', 'no-at-sign.com', 'two @spaces.com', '', null]) {

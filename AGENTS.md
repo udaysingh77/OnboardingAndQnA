@@ -894,7 +894,7 @@ unbounded — unlike OTP resends/email changes, a failed verify call has no side
 Once the service responds successfully, the answer falls through unchanged to the normal
 relay/persist path, so GST's existing `Detail1` write is untouched.
 
-`env.VERIFY_ENABLED` (default `true`) is a blanket kill-switch for this whole gate — same
+`env.GST_VERIFY_ENABLED` (default `true`) is a blanket kill-switch for this whole gate — same
 shape/purpose as `OCR_ENABLED`. Set to `false` locally to test the chat flow past the GST step
 without a real, valid-format GSTIN on hand; when off, the step is never matched in
 `registrationEngine.js`, so the typed answer is saved unchecked, same as any other unguarded text

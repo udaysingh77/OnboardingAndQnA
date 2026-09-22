@@ -70,6 +70,15 @@ export function wantsAnotherLink(message) {
   return ['yes, add another', 'yes', 'y', 'add another'].includes(answer);
 }
 
+// Recognizes the "No, move on" button on the duplicate-link message (registrationEngine.js's
+// WORK_LINK_DUPLICATE branch) - a real url-input block with a button attached, not a synthetic
+// choice input, so anything that ISN'T this keyword falls through as a fresh link paste attempt
+// rather than being read as a decline (unlike wantsAnotherLink, which owns a strict yes/no step).
+export function isMoveOnKeyword(message) {
+  const answer = normalizeAnswer(message);
+  return ['no, move on', 'no', 'move on', 'skip'].includes(answer);
+}
+
 // --- Message text -----------------------------------------------------------
 
 // The card the member confirms against. Only fields the provider actually returned are shown -

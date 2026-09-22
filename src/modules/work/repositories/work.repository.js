@@ -30,4 +30,19 @@ function deleteByAccountId(accountId) {
   return prisma.appAccountsWorkRegistration.deleteMany({ where: { AccountId: BigInt(accountId) } });
 }
 
-export const workRepository = { createWorkRegistration, countByAccountId, findByAccountId, deleteByAccountId };
+// Duplicate-link check: DigitalLink already holds the provider's own canonical/normalized URL by
+// the time a row is written, so an exact match against it is a reliable "same song, same member".
+function existsByAccountIdAndDigitalLink(accountId, digitalLink) {
+  return prisma.appAccountsWorkRegistration.findFirst({
+    where: { AccountId: BigInt(accountId), DigitalLink: digitalLink },
+    select: { WorkNotificationId: true },
+  });
+}
+
+export const workRepository = {
+  createWorkRegistration,
+  countByAccountId,
+  findByAccountId,
+  deleteByAccountId,
+  existsByAccountIdAndDigitalLink,
+};
