@@ -560,7 +560,9 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
       { registrationId, docType, stage: err.details?.stage, details: err.details, err },
       'OCR extraction failed, document saved unverified',
     );
-    return { verified: false, extracted: null };
+    // Surfaces the OCR service's own message (e.g. a wrong-document-type or low-confidence reason)
+    // up to the user-facing failure text in registrationEngine.js, instead of only a generic one.
+    return { verified: false, extracted: null, failureReason: err.message || null };
   }
 }
 
@@ -621,7 +623,13 @@ function toDocumentPublic(doc, ocrResult) {
     documentUrl: doc.DocumentCaption,
     status: doc.DocStatus,
     updatedAt: doc.ModifedDate,
-    ...(ocrResult ? { verified: ocrResult.verified, extracted: ocrResult.extracted } : {}),
+    ...(ocrResult
+      ? {
+          verified: ocrResult.verified,
+          extracted: ocrResult.extracted,
+          ...(ocrResult.failureReason ? { failureReason: ocrResult.failureReason } : {}),
+        }
+      : {}),
   };
 }
 

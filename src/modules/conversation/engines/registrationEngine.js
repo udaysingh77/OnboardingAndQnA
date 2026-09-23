@@ -1234,12 +1234,20 @@ async function handleUploadCore({ userId, token, file }) {
       };
     }
 
+    // result.failureReason carries the OCR service's own message (e.g. a wrong-document-type or
+    // low-confidence reason from ocr.choira.io) when runOcrAndPersist caught one - shown as-is, with
+    // no generic line appended, since the OCR service's own wording already tells the member what to
+    // do (e.g. "This looks like a cancelled cheque, not a PAN card. Please upload your PAN card.").
+    // Falls back to the original generic wording only when there's no failureReason at all
+    // (network/timeout failures, or older callers/tests that don't set it).
     return {
       sessionEnded: false,
       messages: [
         textMessage(
           'ocr-extraction-failed',
-          `We couldn't read this ${labelDocType} document clearly. Please upload a clearer, better-quality image.`,
+          result.failureReason
+            ? `We couldn't verify this ${labelDocType} document: ${result.failureReason}`
+            : `We couldn't read this ${labelDocType} document clearly. Please upload a clearer, better-quality image.`,
         ),
       ],
       input: session.input,
