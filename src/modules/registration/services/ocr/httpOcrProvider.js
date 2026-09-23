@@ -49,7 +49,11 @@ export function createHttpOcrProvider() {
 
     const body = await response.json().catch(() => null);
 
-    if (!response.ok || !body?.success) {
+    // body.success only means the API call itself didn't error - it stays true even when the
+    // document failed real verification (e.g. VERIFICATION_UNAVAILABLE). body.status is the one
+    // that reflects whether OCR/verification actually succeeded, so that's the field that decides
+    // failure here.
+    if (!response.ok || !body?.status) {
       throw appError(body?.message ?? `OCR request failed with status ${response.status}`, {
         statusCode: response.status,
         errorCode: 'OCR_EXTRACTION_FAILED',
