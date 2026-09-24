@@ -70,7 +70,47 @@ function toPublic(payment) {
  * already saved during the Typebot conversation, via feeSchedule.js. This is what stops a member
  * paying whatever they like instead of their actual membership fee.
  */
-async function initiatePayment({ userId, productInfo }) {
+// The chatbot is served on more than one domain, and a browser's login token belongs to exactly
+// one of them. PayU always returns through this backend, so the member's own site is remembered
+// here at initiation and used for the final redirect - sending them back to a different domain
+// logs them out mid-payment and shows a login or failure screen after a payment that succeeded.
+// Only origins on the allow-list are honoured, so the redirect can never be pointed elsewhere.
+const RETURN_ORIGINS = new Map();
+const MAX_REMEMBERED_RETURNS = 500;
+
+function allowedReturnOrigins() {
+  const allowed = new Set();
+  for (const url of [env.PAYU_SUCCESS_URL, env.PAYU_FAILURE_URL]) {
+    try {
+      if (url) allowed.add(new URL(url).origin);
+    } catch {
+      /* a malformed env value simply contributes nothing */
+    }
+  }
+  for (const item of String(env.PAYU_RETURN_ORIGINS ?? '').split(',')) {
+    const trimmed = item.trim();
+    if (trimmed) allowed.add(trimmed.replace(/\/+$/, ''));
+  }
+  return allowed;
+}
+
+function rememberReturnOrigin(txnId, origin) {
+  if (!txnId || !origin || !allowedReturnOrigins().has(origin)) return;
+  // A payment round-trip is minutes; this cap stops a long-running process growing without bound.
+  if (RETURN_ORIGINS.size >= MAX_REMEMBERED_RETURNS) {
+    RETURN_ORIGINS.delete(RETURN_ORIGINS.keys().next().value);
+  }
+  RETURN_ORIGINS.set(txnId, origin);
+}
+
+/** The site this payment began on, consumed once. Null falls back to the configured URLs. */
+function takeReturnOrigin(txnId) {
+  const origin = RETURN_ORIGINS.get(txnId) ?? null;
+  RETURN_ORIGINS.delete(txnId);
+  return origin;
+}
+
+async function initiatePayment({ userId, productInfo, returnOrigin }) {
   const account = await userRepository.findById(userId);
   if (!account) {
     throw notFoundError('User not found');
@@ -134,6 +174,8 @@ async function initiatePayment({ userId, productInfo }) {
   logger.info({ userId, txnId, amount: numAmount }, 'Initiated PayU payment transaction');
 
   const actionUrl = `${env.PAYU_BASE_URL.replace(/\/+$/, '')}/_payment`;
+
+  rememberReturnOrigin(txnId, returnOrigin);
 
   return {
     key: env.PAYU_KEY,
@@ -324,6 +366,7 @@ function hasSuccessfulPayment(userId) {
 
 export const paymentService = {
   initiatePayment,
+  takeReturnOrigin,
   handlePayuCallback,
   verifyPaymentStatus,
   getPaymentHistory,

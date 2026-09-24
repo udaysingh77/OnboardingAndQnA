@@ -137,6 +137,9 @@ const envSchema = z.object({
   // Where the member's BROWSER ends up after our /payment/callback has processed PayU's postback -
   // a frontend page, not PayU's own. payment.controller.js redirects here with ?txnid&status.
   PAYU_SUCCESS_URL: z.string().optional(),
+  // Comma-separated sites a member may be returned to after paying. The origins of
+  // PAYU_SUCCESS_URL/PAYU_FAILURE_URL are always allowed; list any other domains here.
+  PAYU_RETURN_ORIGINS: z.string().optional().default(''),
   PAYU_FAILURE_URL: z.string().optional(),
   PAYU_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
 });
