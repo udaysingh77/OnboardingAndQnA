@@ -479,8 +479,22 @@ function identityNameMatches(existingName, extractedName) {
 
 async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlot) {
   try {
-    const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl }));
+    // addressSlot is the ORIGINAL upload slot before OCR_TYPE_BY_DOC_TYPE's remap (docType is the
+    // remapped, effective OCR type) - PAN vs COMPANY_PAN tells the pan endpoint which holder type
+    // to expect. Shared across all 4 flow paths (the same PAN/COMPANY_PAN slots are reused by both
+    // domestic and NRI branches), so this needs no path-specific branching.
     const account = await registrationRepository.findByAccountId(registrationId);
+    const panHolderType = docType === DOC_TYPES.PAN
+      ? (addressSlot === DOC_TYPES.COMPANY_PAN ? 'c' : addressSlot === DOC_TYPES.PAN ? 'p' : undefined)
+      : undefined;
+    // holderName is sent for the OCR service's own name verification (DRIVING_LICENCE/PASSPORT/
+    // VOTER_ID/BANK only, confirmed with the OCR team - see httpOcrProvider.js). Never sent on the
+    // two company paths (C/NC): this app never collects a real person's name for a company
+    // registration - AccountAlias is the trade name, KindAttention1 is only the signatory's
+    // designation (job title), not a name.
+    const isCompanyPath = account?.AccountRegType === 'C' || account?.AccountRegType === 'NC';
+    const holderName = isCompanyPath ? undefined : account?.AccountName?.trim() || undefined;
+    const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl, panHolderType, holderName }));
 
     // A member could upload their own PAN, then a different person's Aadhaar/Passport - nothing
     // used to check the second identity document's name against the first. Block outright: nothing
