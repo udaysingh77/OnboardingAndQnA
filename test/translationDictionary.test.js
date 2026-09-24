@@ -26,7 +26,7 @@ process.env.TRANSLATION_SUPPORTED_LANGUAGES = 'en,hi,mr,gu';
 
 const { lookup, dictionarySize } = await import('../src/modules/translation/dictionary.js');
 const { messageText, rebuildMessage } = await import('../src/modules/translation/messageBlocks.js');
-const { translateConversationPayload } = await import('../src/modules/translation/translation.service.js');
+const { translateConversationPayload, toSourceText } = await import('../src/modules/translation/translation.service.js');
 
 test('the dictionary is loaded and answers per language', () => {
   assert.equal(dictionarySize(), 3);
@@ -83,4 +83,25 @@ test('only the requested language comes back - never several at once', async () 
 
   const en = await translateConversationPayload(payload(), 'en');
   assert.equal(en.messages[0].content.richText[0].children[0].text, 'Please upload your PAN Card.');
+});
+
+test('a button tapped in another language reaches the flow as English', async () => {
+  // Without this the browser sends back the translated label and Typebot answers
+  // "Invalid message. Please, try again." - the flow only knows its own wording.
+  const payload = { messages: [], input: { id: 'i1', type: 'choice input', items: [{ id: 'c1', content: 'Passport' }] } };
+
+  for (const [language, expected] of [['hi', 'पासपोर्ट'], ['gu', 'પાસપોર્ટ']]) {
+    const shown = (await translateConversationPayload(structuredClone(payload), language)).input.items[0].content;
+    assert.equal(shown, expected, 'the member sees their own language');
+    assert.equal(toSourceText(shown, language), 'Passport', 'the flow receives its own English');
+  }
+});
+
+test('free text is never rewritten on the way in', () => {
+  // Names, addresses and work links are not labels and must survive verbatim.
+  for (const text of ['Nirnay Sawant', 'https://open.spotify.com/track/abc', '04 Sawant chawl, Thane']) {
+    assert.equal(toSourceText(text, 'hi'), text);
+  }
+  assert.equal(toSourceText('पासपोर्ट', 'en'), 'पासपोर्ट', 'an English session maps nothing');
+  assert.equal(toSourceText(undefined, 'hi'), undefined, 'a start call sends no message at all');
 });

@@ -18,7 +18,8 @@ export const sendMessage = async (req, res, next) => {
     const data = await conversationRouter.route({
       userId: req.user.id,
       token: req.token,
-      message: req.body.message,
+      // Sent in the member's language; the flow only knows its own wording.
+      message: translationService.toSourceText(req.body.message, languageOf(req)),
       attachedFileUrls: req.body.attachedFileUrls,
     });
     return ok(res, { data: await translationService.translateConversationPayload(data, languageOf(req)) });

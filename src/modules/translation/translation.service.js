@@ -22,6 +22,7 @@
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
 import { getProvider } from './providers.js';
+import { lookupSource } from './dictionary.js';
 import { collectTranslatable, applyTranslations } from './translatableFields.js';
 import { messageText, rebuildMessage } from './messageBlocks.js';
 
@@ -159,6 +160,17 @@ export async function translateConversationPayload(payload, requestedLanguage) {
   }
 }
 
+/**
+ * What the member sent, in the language the flow is written in. Only exact
+ * matches of known labels are mapped; everything else - names, addresses, work
+ * links - is returned untouched.
+ */
+export function toSourceText(text, requestedLanguage) {
+  const targetLanguage = resolveTargetLanguage(requestedLanguage);
+  if (!targetLanguage) return text;
+  return lookupSource(text, targetLanguage) ?? text;
+}
+
 /** Exposed for the tests and for /health-style checks. */
 export function translationCacheSize() {
   return cache.size;
@@ -170,6 +182,7 @@ export function clearTranslationCache() {
 
 export const translationService = {
   translateConversationPayload,
+  toSourceText,
   translateTexts,
   resolveTargetLanguage,
   supportedLanguages,

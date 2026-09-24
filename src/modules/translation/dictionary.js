@@ -56,6 +56,39 @@ export function lookup(text, language) {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+// Translated label -> the English the flow knows, per language. A member taps a
+// button reading "हाँ, मैं सदस्य बनना चाहता/चाहती हूँ" and that is what the browser
+// sends back; Typebot only recognises its own English, and answers anything else
+// with "Invalid message. Please, try again." So the answer is turned back before
+// it reaches the flow.
+let reverse = null;
+
+function loadReverse() {
+  if (reverse) return reverse;
+
+  reverse = new Map();
+  for (const [english, langs] of load().entries()) {
+    for (const [language, translated] of Object.entries(langs ?? {})) {
+      if (typeof translated !== 'string' || !translated.trim()) continue;
+      const key = `${language}\u0000${translated.trim()}`;
+      // First writer wins: two English phrases can share a translation, and
+      // silently remapping to the later one would answer the wrong question.
+      if (!reverse.has(key)) reverse.set(key, english);
+    }
+  }
+
+  return reverse;
+}
+
+/**
+ * The English the flow expects for something a member sent, or null when this is
+ * not a known label - free text (a name, an address) must pass through untouched.
+ */
+export function lookupSource(text, language) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  return loadReverse().get(`${language}\u0000${text.trim()}`) ?? null;
+}
+
 /** Provider shape: same length, same order; untranslated items come back unchanged. */
 export async function dictionaryTranslate(texts, language) {
   return texts.map((text) => lookup(text, language) ?? text);
