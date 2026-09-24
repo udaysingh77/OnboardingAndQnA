@@ -17,6 +17,7 @@
 // ==================================================================
 import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
+import { dictionaryProvider } from './dictionary.js';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GOOGLE_TRANSLATE_URL = 'https://translation.googleapis.com/language/translate/v2';
@@ -126,6 +127,8 @@ async function googleTranslate(texts, targetLanguage) {
 }
 
 const PROVIDERS = {
+  // Ships with the project: instant, free, reviewed, and needs no credential.
+  dictionary: dictionaryProvider,
   gemini: { translate: geminiTranslate, isConfigured: geminiConfigured },
   google: { translate: googleTranslate, isConfigured: googleConfigured },
 };

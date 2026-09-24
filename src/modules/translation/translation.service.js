@@ -23,6 +23,7 @@ import { env } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
 import { getProvider } from './providers.js';
 import { collectTranslatable, applyTranslations } from './translatableFields.js';
+import { messageText, rebuildMessage } from './messageBlocks.js';
 
 // text -> translation, keyed per language. Bounded so a long-running process
 // cannot grow without limit; the flow's vocabulary is far smaller than the cap.
@@ -113,8 +114,34 @@ export async function translateConversationPayload(payload, requestedLanguage) {
   const targetLanguage = resolveTargetLanguage(requestedLanguage);
   if (!targetLanguage || !payload) return payload;
 
-  const originals = collectTranslatable(payload);
-  if (originals.length === 0) return payload;
+  // Bubbles first, as whole messages: a sentence split across bold/link nodes is
+  // only translatable - and only matches the dictionary - when it is joined back up.
+  let working = payload;
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const bubbleTexts = messages.map((m) => (m?.content?.richText ? messageText(m.content) : '')).filter(Boolean);
+
+  if (bubbleTexts.length) {
+    const translatedBubbles = await translateTexts(bubbleTexts, targetLanguage);
+    const byOriginal = new Map();
+    bubbleTexts.forEach((text, i) => {
+      if (translatedBubbles[i] && translatedBubbles[i] !== text) byOriginal.set(text, translatedBubbles[i]);
+    });
+
+    if (byOriginal.size) {
+      working = {
+        ...payload,
+        messages: messages.map((m) => {
+          if (!m?.content?.richText) return m;
+          const hit = byOriginal.get(messageText(m.content));
+          return hit ? { ...m, content: rebuildMessage(m.content, hit) } : m;
+        }),
+      };
+    }
+  }
+
+  // Then everything else a member reads: button labels and input hints.
+  const originals = collectTranslatable(working);
+  if (originals.length === 0) return working;
 
   try {
     const translated = await translateTexts(originals, targetLanguage);
@@ -123,8 +150,8 @@ export async function translateConversationPayload(payload, requestedLanguage) {
       if (translated[index] && translated[index] !== text) map.set(text, translated[index]);
     });
 
-    if (map.size === 0) return payload;
-    return applyTranslations(payload, map);
+    if (map.size === 0) return working;
+    return applyTranslations(working, map);
   } catch (err) {
     // Belt and braces: the providers already swallow their own failures.
     logger.warn({ err: err.message, targetLanguage }, 'Translation failed, answering in the original language');
