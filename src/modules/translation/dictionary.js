@@ -49,11 +49,50 @@ export function dictionarySize() {
   return load().size;
 }
 
-/** The stored translation for one string, or null when it is not in the file. */
+// Not every message is fixed text. The backend writes some itself, with a live
+// value inside - "We've sent a 4-digit OTP to <the member's address>." Those are
+// stored with {0} where the value goes, so one entry covers every member.
+// Only emails and URLs are treated as variable: a bare number would wreck
+// wording like "4-digit", and there is nothing to gain from replacing it.
+const VARIABLE_PARTS = [
+  // The domain is matched label by label so the regex cannot swallow the full
+  // stop that ends the sentence - "...@gmail.com." must template to "{0}.", not "{0}".
+  /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g,
+  /https?:\/\/\S+/g,
+];
+
+function toTemplate(text) {
+  const values = [];
+  let template = text;
+
+  for (const pattern of VARIABLE_PARTS) {
+    template = template.replace(pattern, (match) => {
+      values.push(match);
+      return `{${values.length - 1}}`;
+    });
+  }
+
+  return { template, values };
+}
+
+const fillIn = (text, values) => text.replace(/\{(\d+)\}/g, (whole, index) => values[Number(index)] ?? whole);
+
+/**
+ * The stored translation for one string, or null when it is not in the file.
+ * Falls back to matching the message with its live values replaced by {0}, {1},
+ * so a message carrying an email address still resolves.
+ */
 export function lookup(text, language) {
-  const hit = load().get(String(text).trim());
-  const value = hit?.[language];
-  return typeof value === 'string' && value.trim() ? value : null;
+  const trimmed = String(text).trim();
+
+  const exact = load().get(trimmed)?.[language];
+  if (typeof exact === 'string' && exact.trim()) return exact;
+
+  const { template, values } = toTemplate(trimmed);
+  if (!values.length) return null;
+
+  const templated = load().get(template)?.[language];
+  return typeof templated === 'string' && templated.trim() ? fillIn(templated, values) : null;
 }
 
 // Translated label -> the English the flow knows, per language. A member taps a

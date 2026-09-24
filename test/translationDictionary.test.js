@@ -17,6 +17,8 @@ writeFileSync(dictPath, JSON.stringify({
   'Upload Address Proof\nPlease upload any one of the following documents as proof of your permanent address:':
     { hi: 'पते का प्रमाण अपलोड करें\nकृपया स्थायी पते का कोई एक दस्तावेज़ अपलोड करें:', mr: 'x', gu: 'y' },
   Passport: { hi: 'पासपोर्ट', mr: 'पासपोर्ट', gu: 'પાસપોર્ટ' },
+  "We've sent a 4-digit OTP to {0}. Enter it to verify.": {
+    hi: 'हमने {0} पर 4 अंकों का OTP भेजा है। सत्यापित करने के लिए इसे दर्ज करें।', mr: 'x', gu: 'y' },
 }), 'utf8');
 
 process.env.TRANSLATION_ENABLED = 'true';
@@ -29,7 +31,7 @@ const { messageText, rebuildMessage } = await import('../src/modules/translation
 const { translateConversationPayload, toSourceText } = await import('../src/modules/translation/translation.service.js');
 
 test('the dictionary is loaded and answers per language', () => {
-  assert.equal(dictionarySize(), 3);
+  assert.equal(dictionarySize(), 4);
   assert.equal(lookup('Passport', 'gu'), 'પાસપોર્ટ');
   assert.equal(lookup('Passport', 'hi'), 'पासपोर्ट');
   assert.equal(lookup('not in the flow', 'hi'), null, 'an unknown phrase stays English rather than being guessed');
@@ -104,4 +106,20 @@ test('free text is never rewritten on the way in', () => {
   }
   assert.equal(toSourceText('पासपोर्ट', 'en'), 'पासपोर्ट', 'an English session maps nothing');
   assert.equal(toSourceText(undefined, 'hi'), undefined, 'a start call sends no message at all');
+});
+
+test('a message carrying a live value matches one stored entry', () => {
+  // The backend writes some messages itself with the member's own address inside.
+  // One dictionary entry has to serve every member, so the address is templated
+  // out for the lookup and put back afterwards.
+  const forNirnay = lookup("We've sent a 4-digit OTP to nirnaysawant21@gmail.com. Enter it to verify.", 'hi');
+  assert.match(forNirnay, /nirnaysawant21@gmail\.com/, 'the address must survive');
+  assert.match(forNirnay, /4 अंकों का OTP/);
+
+  const forMaya = lookup("We've sent a 4-digit OTP to maya.mishra@choira.io. Enter it to verify.", 'hi');
+  assert.match(forMaya, /maya\.mishra@choira\.io/, 'the same entry serves a different member');
+
+  // The address must not swallow the full stop that ends the sentence.
+  assert.match(forNirnay, /gmail\.com पर/, 'the sentence after the address is kept');
+  assert.equal(lookup('Totally unknown sentence with bob@example.com in it.', 'hi'), null);
 });
