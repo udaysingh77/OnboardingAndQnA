@@ -127,6 +127,17 @@ function isAffirmative(message) {
   return ['yes, confirm', 'yes', 'y', 'confirm'].includes(normalized);
 }
 
+// "Is your current address the same as your permanent address?" - one per role path, confirmed via
+// the published flow's builder-API export. Its answer carries no Typebot variableId (nothing in
+// conversationFieldMap.js observes it), so it's detected by block id instead, the same technique
+// paymentGate.js uses for the payment button.
+const SAME_AS_ADDRESS_BLOCK_IDS = new Set([
+  'i8v9h0dszpnwphwwl2mxf6te',
+  'ddk7tlmjhkvt3zktskzt9i9e',
+  'ctpx2z89l8pqltt5ehahmq3a',
+  'cbmqojadjfm2jmbk9c17a59q',
+]);
+
 function textMessage(id, text) {
   return {
     id,
@@ -966,6 +977,14 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
         await registrationService.saveConversationField(userId, userId, field, message);
       } catch (err) {
         logger.warn({ userId, field, err }, 'Failed to persist conversation answer, continuing relay');
+      }
+    }
+
+    if (SAME_AS_ADDRESS_BLOCK_IDS.has(answeredInput.id) && isAffirmative(message)) {
+      try {
+        await registrationService.copyPermanentAddressToCurrent(userId);
+      } catch (err) {
+        logger.warn({ userId, err }, 'Failed to copy permanent address to current, continuing relay');
       }
     }
 

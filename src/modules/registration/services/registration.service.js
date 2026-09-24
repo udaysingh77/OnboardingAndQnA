@@ -140,6 +140,20 @@ const ADDRESS_COLUMN_BY_SLOT = {
   [DOC_TYPES.REGISTERED_ADDRESS_PROOF]: 'AccountAddress',
   [DOC_TYPES.COMM_ADDRESS_PROOF_2]: 'AccountAddress_PR',
 };
+// Each address column's paired pincode column - AccountAddress/AccountAddress_PR always travel
+// together (same permanent-vs-current split), so whichever one gets written, its pincode sibling
+// does too.
+const PINCODE_COLUMN_BY_ADDRESS_COLUMN = { AccountAddress: 'Pincode', AccountAddress_PR: 'Pincode_PR' };
+
+// Neither OCR nor a manually-typed address gives us a separate pincode field - just one flat
+// address string. Indian PIN codes are 6 digits, first digit 1-9, and sit at the end of a full
+// address, so take the LAST standalone match rather than the first (a house/flat number earlier in
+// the string could otherwise be mistaken for one).
+function extractPincode(address) {
+  if (typeof address !== 'string') return null;
+  const matches = address.match(/\b[1-9]\d{5}\b/g);
+  return matches?.length ? matches[matches.length - 1] : null;
+}
 // Fields conversationFieldMap.js is allowed to write to - keeps an arbitrary
 // mapped column name from being trusted blindly, even though the map only
 // ever contains these three today.
@@ -351,11 +365,29 @@ async function saveConversationField(userId, registrationId, field, value) {
     // languageLookup.service.js. The member's own words always get stored; LanguageId only on a
     // confident match against IPRS's App_Language_Lookup, never guessed.
     update = { LanguageName: trimmed, LanguageId: await languageLookupService.resolveLanguageId(trimmed) };
+  } else if (field === 'AccountAddress' || field === 'AccountAddress_PR') {
+    update = { [field]: trimmed };
+    const pincode = extractPincode(trimmed);
+    if (pincode) update[PINCODE_COLUMN_BY_ADDRESS_COLUMN[field]] = pincode;
   } else {
     update = { [field]: trimmed };
   }
 
   await registrationRepository.update(registrationId, update);
+}
+
+// "Is your current address the same as your permanent address?" - Typebot's own choice-input
+// block for this carries no variableId (nothing observes the answer today), so registrationEngine
+// calls this directly by block id when the member answers "Yes". Copies both the address and its
+// pincode - the two always travel together (see PINCODE_COLUMN_BY_ADDRESS_COLUMN).
+async function copyPermanentAddressToCurrent(userId) {
+  const account = await registrationRepository.findByAccountId(userId);
+  if (!account?.AccountAddress?.trim()) return;
+
+  await registrationRepository.update(userId, {
+    AccountAddress_PR: account.AccountAddress,
+    ...(account.Pincode ? { Pincode_PR: account.Pincode } : {}),
+  });
 }
 
 function normalizeEmail(value) {
@@ -459,7 +491,32 @@ function parseOcrDate(value) {
 // Exported for ocrLabels.test.js - a pure function, and the passport field names are exactly
 // the kind of thing that breaks silently.
 export function normalizeExtracted(docType, extracted) {
-  if (docType !== DOC_TYPES.PASSPORT || !extracted) return extracted;
+  if (!extracted) return extracted;
+
+  if (docType === DOC_TYPES.PAN) {
+    // Confirmed live against the real document-OCR endpoint (POST /api/documents/pan with a real
+    // card): { pan, name, fatherName, dob, gender, isValid, ... } - pan/name were already right; no
+    // full_name_split field exists there (that shape belongs to a separate "PAN Comprehensive"
+    // verification API, not this one - its response is nested inside this one's own
+    // `verification` block). Split `name` itself instead; keep full_name_split as a fallback in
+    // case a future response variant does send it.
+    const providedSplit = Array.isArray(extracted.full_name_split) ? extracted.full_name_split.filter(Boolean) : [];
+    const name = extracted.name ?? extracted.full_name;
+    const tokens = providedSplit.length ? providedSplit : (name ? name.trim().split(/\s+/).filter(Boolean) : []);
+    return {
+      ...extracted,
+      pan: extracted.pan ?? extracted.pan_number,
+      name,
+      // Both, when the response has both - not just whichever comes first. Most PAN cards only
+      // ever print one, but this doesn't assume that.
+      parentName: [extracted.fatherName, extracted.motherName].filter(Boolean).join(', ') || undefined,
+      // First two tokens join into FirstName, whatever's left joins into LastName.
+      firstName: tokens.length ? tokens.slice(0, 2).join(' ') : undefined,
+      lastName: tokens.length > 2 ? tokens.slice(2).join(' ') : undefined,
+    };
+  }
+
+  if (docType !== DOC_TYPES.PASSPORT) return extracted;
   const fullName = [extracted.givenName, extracted.surname].filter(Boolean).join(' ').trim();
   return {
     ...extracted,
@@ -516,7 +573,13 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     }
 
     if (docType === DOC_TYPES.PAN && extracted.pan) {
-      await registrationRepository.update(registrationId, { Detail2: extracted.pan });
+      const panUpdate = { Detail2: extracted.pan };
+      // Write-once, same guard AccountName uses below - a later PAN re-upload shouldn't clobber an
+      // already-confirmed name split.
+      if (extracted.firstName && !account?.FirstName?.trim()) panUpdate.FirstName = extracted.firstName.slice(0, 30);
+      if (extracted.lastName && !account?.LastName?.trim()) panUpdate.LastName = extracted.lastName.slice(0, 45);
+      if (extracted.parentName && !account?.FatherName?.trim()) panUpdate.FatherName = extracted.parentName.slice(0, 100);
+      await registrationRepository.update(registrationId, panUpdate);
     }
 
     // The member's name, taken from an identity document. This is the only name in the system with
@@ -528,7 +591,13 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
     // on the row. Restricted to identity documents too - an electricity bill's name is often a
     // landlord's or a parent's, which is evidence of nothing.
     if (IDENTITY_OCR_DOC_TYPES.includes(docType) && extracted.name && !account?.AccountName?.trim()) {
-      await registrationRepository.update(registrationId, { AccountName: String(extracted.name).trim().slice(0, 100) });
+      const name = String(extracted.name).trim().slice(0, 100);
+      const nameUpdate = { AccountName: name };
+      // Same "write once" guard as AccountName above - the member's name is the first trustworthy
+      // identity this account has, so it doubles as who created/last-touched the account record.
+      if (!account?.CreatedBy?.trim()) nameUpdate.CreatedBy = name;
+      if (!account?.ModifedBy?.trim()) nameUpdate.ModifedBy = name;
+      await registrationRepository.update(registrationId, nameUpdate);
     }
 
     if (docType === DOC_TYPES.BANK) {
@@ -543,7 +612,10 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
 
     const addressColumn = ADDRESS_COLUMN_BY_SLOT[addressSlot];
     if (extracted.address && addressColumn) {
-      await registrationRepository.update(registrationId, { [addressColumn]: extracted.address });
+      const addressUpdate = { [addressColumn]: extracted.address };
+      const pincode = extractPincode(extracted.address);
+      if (pincode) addressUpdate[PINCODE_COLUMN_BY_ADDRESS_COLUMN[addressColumn]] = pincode;
+      await registrationRepository.update(registrationId, addressUpdate);
     }
 
     // Whichever doc type happens to extract these - PAN/Passport for dob, Aadhaar/Voter ID for
@@ -663,6 +735,7 @@ export const registrationService = {
   getStatus,
   saveDocument,
   saveConversationField,
+  copyPermanentAddressToCurrent,
   isEmailTakenByAnotherAccount,
   addAliases,
   parseAliasList,
