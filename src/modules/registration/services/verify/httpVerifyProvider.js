@@ -4,15 +4,12 @@
 // value (GSTIN) rather than a document image. TAN is deliberately not
 // wired in yet - see verifyGate.js.
 //
-// PASS/FAIL RULE (confirmed, not guessed): decided by the response's own
-// TOP-LEVEL `success` field alone. A live probe against a syntactically
-// wrong GSTIN returned `{ success: true, verified: false, message:
-// "Invalid GSTIN", data: null }` - so `verified`/`data.gstin_status`/
-// `data.gstin_checksum_valid` are NOT used to reject an answer; only a
-// genuine service/transport problem (network error, non-2xx, or the
-// service's own success:false) blocks the member. Once `success` is
-// true, the answer is treated as passed regardless of what the nested
-// fields say.
+// PASS/FAIL RULE (confirmed via a live probe, not guessed): the real API has
+// no `success` or `verified` field at all - only a top-level `status`
+// boolean, same shape as the document OCR endpoints. A live probe returned
+// `{ status: false, message: "Invalid GSTIN", data: null }` for a wrong
+// GSTIN and `{ status: true, message: "GSTIN verified successfully", data:
+// {...} }` for a valid one. `status` is what decides pass/fail here.
 // ==================================================================
 import { appError } from '../../../../shared/errors.js';
 import { env } from '../../../../config/env.js';
@@ -45,7 +42,7 @@ export function createHttpVerifyProvider() {
 
     const body = await response.json().catch(() => null);
 
-    if (!response.ok || !body?.success) {
+    if (!response.ok || !body?.status) {
       throw appError(body?.message ?? `Verify request failed with status ${response.status}`, {
         statusCode: response.status,
         errorCode: 'VERIFY_REQUEST_FAILED',
@@ -53,8 +50,7 @@ export function createHttpVerifyProvider() {
       });
     }
 
-    // Reaching here means body.success was already true (checked above) - `verified` on the
-    // returned result reflects that alone, never the nested fields. See the pass/fail rule above.
+    // Reaching here means body.status was already true (checked above). See the pass/fail rule above.
     return { verified: true, message: body.message, data: body.data };
   }
 

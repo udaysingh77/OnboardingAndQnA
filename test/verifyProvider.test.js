@@ -3,13 +3,11 @@
 // monkey-patched for the duration of each test.
 //
 // The property worth pinning hard: PASS/FAIL IS DECIDED BY THE RESPONSE'S
-// TOP-LEVEL `success` FIELD ALONE - a live probe against a syntactically
-// wrong GSTIN returned `{ success: true, verified: false, message:
-// "Invalid GSTIN", data: null }`, so `verified` and everything under
-// `data` (gstin_status, gstin_checksum_valid, ...) are informational
-// only and must never be used to reject an answer. Only a genuine
-// service/transport failure (network error, non-2xx, success:false)
-// blocks the member.
+// TOP-LEVEL `status` FIELD - the real API has no `success`/`verified` field
+// at all, only `status` (boolean), same shape as the document OCR
+// endpoints. A live probe returned `{ status: false, message: "Invalid
+// GSTIN", data: null }` for a wrong GSTIN and `{ status: true, message:
+// "GSTIN verified successfully", data: {...} }` for a valid one.
 // Run: npm test
 // ==================================================================
 import { test, after } from 'node:test';
@@ -38,7 +36,7 @@ test('GSTIN: posts {gstin} to /api/verify/gstin', async () => {
   mockFetch(async (url, options) => {
     seenUrl = url;
     seenBody = JSON.parse(options.body);
-    return jsonResponse(200, { success: true, verified: true, message: 'GSTIN verified successfully', data: { gstin: '08AKWPJ1234H1ZN' } });
+    return jsonResponse(200, { status: true, message: 'GSTIN verified successfully', data: { gstin: '08AKWPJ1234H1ZN' } });
   });
 
   const provider = createHttpVerifyProvider();
@@ -48,21 +46,6 @@ test('GSTIN: posts {gstin} to /api/verify/gstin', async () => {
   assert.deepEqual(seenBody, { gstin: '08AKWPJ1234H1ZN' });
   assert.equal(result.verified, true);
   assert.equal(result.message, 'GSTIN verified successfully');
-});
-
-test('success:true passes even when the nested verified/status fields disagree', async () => {
-  // The exact real-world shape a live probe returned for an "invalid" GSTIN.
-  mockFetch(async () => jsonResponse(200, {
-    success: true,
-    verified: false,
-    message: 'Invalid GSTIN',
-    data: null,
-  }));
-
-  const provider = createHttpVerifyProvider();
-  const result = await provider.verify({ docType: 'GSTIN', value: 'ANYTHING' });
-
-  assert.equal(result.verified, true, 'success:true alone is the pass signal, verified:false is ignored');
 });
 
 test('a network failure throws VERIFY_REQUEST_FAILED', async () => {
@@ -78,7 +61,7 @@ test('a network failure throws VERIFY_REQUEST_FAILED', async () => {
 });
 
 test('a non-2xx response throws VERIFY_REQUEST_FAILED', async () => {
-  mockFetch(async () => jsonResponse(500, { success: false, message: 'upstream down' }));
+  mockFetch(async () => jsonResponse(500, { status: false, message: 'upstream down' }));
 
   const provider = createHttpVerifyProvider();
   await assert.rejects(
@@ -87,15 +70,14 @@ test('a non-2xx response throws VERIFY_REQUEST_FAILED', async () => {
   );
 });
 
-test('a 2xx response with success:false also throws VERIFY_REQUEST_FAILED', async () => {
-  // Distinct from the above: a clean HTTP status but the service itself says it couldn't process
-  // the request - still a service problem, not "the GSTIN is bad" (that case is success:true).
-  mockFetch(async () => jsonResponse(200, { success: false, message: 'could not process request' }));
+test('a 2xx response with status:false (an invalid GSTIN) throws VERIFY_REQUEST_FAILED with the service\'s own message', async () => {
+  // The exact real-world shape a live probe returned for an invalid GSTIN.
+  mockFetch(async () => jsonResponse(200, { status: false, message: 'Invalid GSTIN', data: null }));
 
   const provider = createHttpVerifyProvider();
   await assert.rejects(
     provider.verify({ docType: 'GSTIN', value: 'X' }),
-    (err) => err.errorCode === 'VERIFY_REQUEST_FAILED',
+    (err) => err.errorCode === 'VERIFY_REQUEST_FAILED' && err.message === 'Invalid GSTIN',
   );
 });
 
@@ -118,7 +100,7 @@ test('createHttpVerifyProvider and createStubVerifyProvider are genuinely differ
   // The switch in verifyProvider.factory.js is only worth having if the two branches actually
   // behave differently - pin that directly, independent of which one OCR_PROVIDER currently picks.
   // fetch is mocked so this stays offline like every other test here (no real call to ocr.choira.io).
-  mockFetch(async () => jsonResponse(200, { success: true, verified: true, message: 'ok', data: {} }));
+  mockFetch(async () => jsonResponse(200, { status: true, message: 'ok', data: {} }));
   const httpResult = await createHttpVerifyProvider().verify({ docType: 'GSTIN', value: 'X' });
   assert.equal(httpResult.verified, true, 'http actually calls out and resolves');
 
