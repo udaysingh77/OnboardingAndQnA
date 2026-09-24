@@ -108,6 +108,14 @@ const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v !== 'false'),
+  // Blanket kill-switch for the `name` field sent to DRIVING_LICENCE/PASSPORT/VOTER_ID/BANK OCR
+  // calls (independent of OCR_ENABLED/IDENTITY_NAME_CHECK_ENABLED) - flip to false to stop the OCR
+  // service's own name-match check from blocking uploads (e.g. NAME_MISMATCH) without needing a
+  // document in the account holder's actual name on hand. Mirrors OCR_ENABLED's exact shape/reasoning.
+  OCR_NAME_VERIFICATION_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v !== 'false'),
 
   TYPEBOT_API_BASE_URL: z.string().default('https://typebot.io'),
   // The bot's internal id (preview mode) or publicId (once published) - see TYPEBOT_PREVIEW_MODE.
