@@ -34,12 +34,9 @@ import { resolveWorkLink } from '../../work/services/workLinkResolver.service.js
 import { matchCredits, MATCH_TRUST } from '../../work/services/workMatch.service.js';
 import {
   isPaymentStep,
-  confirmsReview,
   describeReview,
-  describeCorrection,
   describePaymentPending,
   describePaymentReceived,
-  PAYMENT_REVIEW_INPUT,
 } from '../services/typebot/paymentGate.js';
 import { paymentService } from '../../payment/services/payment.service.js';
 import { registrationReviewService, renderSections } from '../../registration/services/registrationReview.service.js';
@@ -629,30 +626,6 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
     message = email;
   }
 
-  // Resolve the pre-payment review. The stashed input is the real payment block Typebot handed
-  // us a turn ago - either answer ends up returning it, because Typebot can't be driven backwards
-  // and stranding someone on a review screen would be worse than letting them pay and write in.
-  if (existing?.pendingPaymentReview && message !== undefined) {
-    const { input } = existing.pendingPaymentReview;
-    typebotSessionStore.set(userId, { sessionId: existing.sessionId, input });
-
-    if (confirmsReview(message)) {
-      return {
-        sessionEnded: false,
-        messages: [],
-        input,
-        progress: resolveProgress(input.id),
-      };
-    }
-
-    return {
-      sessionEnded: false,
-      messages: [textMessage('payment-review-correction', describeCorrection(userId))],
-      input,
-      progress: resolveProgress(input.id),
-    };
-  }
-
   // The payment button is where this flow stops. Paying happens through /payment/initiate and the
   // PayU callback, never through Typebot - so an answer arriving here is not a payment, it's a
   // member typing into the chat. Relaying it used to hand Typebot the button's own answer, which
@@ -1067,24 +1040,19 @@ async function handleCore({ userId, token, message, attachedFileUrls }) {
   ];
   const messages = notices.length ? [...notices, ...(response.messages ?? [])] : (response.messages ?? []);
 
-  // Typebot just offered the payment button. Hold it back one turn and show the member everything
-  // on file first - much of it was read off their documents by OCR rather than typed, and this is
-  // the last point at which a wrong bank account number can still be caught. Typebot's own messages
-  // are kept above the review, so nothing the flow said is lost.
+  // Typebot just offered the payment button. Show the member everything on file first, in the same
+  // turn as the real payment button - much of it was read off their documents by OCR rather than
+  // typed, and this is the last point at which a wrong bank account number can still be caught.
+  // Typebot's own messages are kept above the review, so nothing the flow said is lost. There is no
+  // separate confirmation step: the review is informational, the button is always right there.
   if (!ended && isPaymentStep(response.input?.id)) {
     try {
       const sections = await registrationReviewService.buildReview(userId);
 
-      typebotSessionStore.set(userId, {
-        sessionId,
-        input: response.input,
-        pendingPaymentReview: { input: response.input },
-      });
-
       return {
         sessionEnded: false,
         messages: [...messages, textMessage('payment-review', describeReview(sections))],
-        input: PAYMENT_REVIEW_INPUT,
+        input: response.input,
         progress: resolveProgress(response.input.id),
       };
     } catch (err) {
