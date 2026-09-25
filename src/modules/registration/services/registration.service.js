@@ -176,6 +176,7 @@ const CONVERSATION_FIELDS = [
   'EntityType',
   'LanguageName', // mother tongue - also resolves LanguageId, see saveConversationField
   'TRCNo', // Tax Residency Certificate number (NRI paths)
+  'Consent', // "I Accept" x2 - special-cased below, the answer text itself is never stored
 ];
 
 // Exported (not just a local const) so tests can swap ocrProvider.extract, same technique
@@ -272,7 +273,9 @@ export function buildDocFileName(accountId, documentLookupId, documentUrl) {
 // prod's own convention (confirmed against mraai_uat) instead of a truncated, broken link. The
 // actual openable URL stays in App_Accounts_Doc.DocumentCaption, untouched.
 export function buildAccountImagePath(accountId, documentUrl) {
-  const plain = extractFileName(documentUrl);
+  // IPRS's own convention is underscores throughout, but the original filename (a WhatsApp export,
+  // a phone's camera roll name) often carries hyphens instead - normalize before building the path.
+  const plain = extractFileName(documentUrl)?.replaceAll('-', '_');
   if (!plain) return null;
 
   const prefix = `MemberPhoto/MPU_${accountId}_`;
@@ -369,6 +372,11 @@ async function saveConversationField(userId, registrationId, field, value) {
     update = { [field]: trimmed };
     const pincode = extractPincode(trimmed);
     if (pincode) update[PINCODE_COLUMN_BY_ADDRESS_COLUMN[field]] = pincode;
+  } else if (field === 'Consent') {
+    // Single-choice "I Accept", no reject option - the answer text carries no information beyond
+    // "this block was reached", and reaching it means both consent blocks were accepted (see
+    // conversationFieldMap.js's comment on this variableId).
+    update = { Consent: 1, ConsentDate: new Date() };
   } else {
     update = { [field]: trimmed };
   }
