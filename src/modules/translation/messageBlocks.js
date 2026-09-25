@@ -13,7 +13,19 @@
 // URL intact.
 // ==================================================================
 
+import { lookup } from './dictionary.js';
+
 const isLink = (node) => node && typeof node === 'object' && node.type === 'a' && node.url;
+
+// "Privacy Notice", "(Click Here to Download)" - the label is read, the URL is not.
+function translateLink(link, language) {
+  const children = (link.children ?? []).map((child) => {
+    if (typeof child?.text !== 'string' || !child.text.trim()) return child;
+    const hit = language ? lookup(child.text.trim(), language) : null;
+    return hit ? { ...child, text: child.text.replace(child.text.trim(), hit) } : child;
+  });
+  return { ...link, children };
+}
 
 /** The message as a member reads it: paragraphs separated by newline. */
 export function messageText(content) {
@@ -48,7 +60,7 @@ function collectLinks(content) {
 }
 
 /** The bubble rewritten in `translated`, with the original links kept below it. */
-export function rebuildMessage(content, translated) {
+export function rebuildMessage(content, translated, language) {
   const richText = translated
     .split('\n')
     .filter((line) => line.trim())
@@ -56,7 +68,8 @@ export function rebuildMessage(content, translated) {
 
   const links = collectLinks(content);
   if (links.length) {
-    richText.push({ type: 'p', children: links.flatMap((link, i) => (i ? [{ text: '  ' }, link] : [link])) });
+    const shown = links.map((link) => translateLink(link, language));
+    richText.push({ type: 'p', children: shown.flatMap((link, i) => (i ? [{ text: '  ' }, link] : [link])) });
   }
 
   return { ...content, richText };

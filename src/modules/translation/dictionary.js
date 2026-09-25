@@ -59,6 +59,9 @@ const VARIABLE_PARTS = [
   // stop that ends the sentence - "...@gmail.com." must template to "{0}.", not "{0}".
   /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g,
   /https?:\/\/\S+/g,
+  // "completed about 11% of it" - the number changes with every member, but the
+  // per-cent sign does not, so it stays in the phrase and only the digits move.
+  /\d+(?=%)/g,
 ];
 
 function toTemplate(text) {
@@ -84,11 +87,60 @@ const fillIn = (text, values) => text.replace(/\{(\d+)\}/g, (whole, index) => va
  */
 export function lookup(text, language) {
   const trimmed = String(text).trim();
+  return wholeString(trimmed, language) ?? bySentence(trimmed, language);
+}
 
-  const exact = load().get(trimmed)?.[language];
+/**
+ * Some messages are assembled at runtime from parts that are each stored
+ * separately - a reason followed by standing advice, or a greeting followed by
+ * a progress line. Whole-string matching can never cover those, because the
+ * combinations multiply.
+ *
+ * The text is cut into sentences and the longest run of them that the
+ * dictionary knows is taken first, so an entry that is itself two sentences
+ * ("OTP has expired. Please request a new OTP.") still matches as one piece. A
+ * run with no entry keeps its English, which reads better than dropping it.
+ */
+function bySentence(text, language) {
+  const pieces = text.split(/(\n+|(?<=[.!?])\s+)/);
+  if (pieces.length < 3) return null;
+
+  const units = [];
+  for (let i = 0; i < pieces.length; i += 2) units.push({ text: pieces[i], after: pieces[i + 1] ?? '' });
+
+  let translatedAny = false;
+  const out = [];
+  let start = 0;
+
+  while (start < units.length) {
+    let taken = 0;
+    for (let end = units.length; end > start; end -= 1) {
+      const run = units.slice(start, end).map((u, k) => u.text + (k < end - start - 1 ? u.after : '')).join('');
+      const hit = wholeString(run.trim(), language);
+      if (!hit) continue;
+      out.push(run.replace(run.trim(), hit), units[end - 1].after);
+      translatedAny = true;
+      taken = end - start;
+      break;
+    }
+    if (!taken) {
+      out.push(units[start].text, units[start].after);
+      taken = 1;
+    }
+    start += taken;
+  }
+
+  return translatedAny ? out.join('') : null;
+}
+
+/** An exact entry, or one whose variable parts have been templated out. */
+function wholeString(text, language) {
+  if (!text) return null;
+
+  const exact = load().get(text)?.[language];
   if (typeof exact === 'string' && exact.trim()) return exact;
 
-  const { template, values } = toTemplate(trimmed);
+  const { template, values } = toTemplate(text);
   if (!values.length) return null;
 
   const templated = load().get(template)?.[language];

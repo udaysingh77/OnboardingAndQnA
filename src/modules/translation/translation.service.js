@@ -134,7 +134,7 @@ export async function translateConversationPayload(payload, requestedLanguage) {
         messages: messages.map((m) => {
           if (!m?.content?.richText) return m;
           const hit = byOriginal.get(messageText(m.content));
-          return hit ? { ...m, content: rebuildMessage(m.content, hit) } : m;
+          return hit ? { ...m, content: rebuildMessage(m.content, hit, targetLanguage) } : m;
         }),
       };
     }
