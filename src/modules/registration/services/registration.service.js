@@ -6,6 +6,7 @@
 import { appError, badRequestError, forbiddenError, notFoundError } from '../../../shared/errors.js';
 import { env } from '../../../config/env.js';
 import { logger } from '../../../utils/logger.js';
+import { prisma } from '../../../shared/prisma.js';
 import { registrationRepository } from '../repositories/registration.repository.js';
 import { createOcrProvider } from './ocr/ocrProvider.factory.js';
 import { paymentRepository } from '../../payment/repositories/payment.repository.js';
@@ -144,6 +145,29 @@ const ADDRESS_COLUMN_BY_SLOT = {
 // together (same permanent-vs-current split), so whichever one gets written, its pincode sibling
 // does too.
 const PINCODE_COLUMN_BY_ADDRESS_COLUMN = { AccountAddress: 'Pincode', AccountAddress_PR: 'Pincode_PR' };
+
+// App_Accounts.BookId - IPRS's own dbo.GetStateBookId SQL function (confirmed live on mraai_uat)
+// already encodes the real zone/category logic, including a quirk that isn't derivable from data
+// alone: NRI categories (NI/NC) don't zone-match by state at all, they're hardcoded to the West
+// NRI book. Rather than re-deriving that in JS (and risking getting quirks like this wrong), this
+// runs their exact reference query per AccountId - it reads AccountRegType/Pincode off the row
+// itself, so no other args are needed. Both AccountRegType and the permanent address/pincode can
+// be answered in either order by the flow, so this is called after either one is written - same
+// re-derivation pattern copyPermanentAddressToCurrent already uses.
+async function resolveAndPersistBookId(registrationId) {
+  const rows = await prisma.$queryRaw`
+    SELECT dbo.GetStateBookId(AG.GroupId, AA.AccountRegType) AS BookId
+    FROM App_Accounts AA
+    CROSS APPLY (
+      SELECT TOP 1 GroupId FROM App_Geographical
+      WHERE GeographicalCode = CAST(AA.Pincode AS VARCHAR(20))
+    ) AG
+    WHERE AA.AccountId = ${BigInt(registrationId)}
+  `;
+  const bookId = rows[0]?.BookId;
+  if (bookId == null) return;
+  await registrationRepository.update(registrationId, { BookId: bookId });
+}
 
 // Neither OCR nor a manually-typed address gives us a separate pincode field - just one flat
 // address string. Indian PIN codes are 6 digits, first digit 1-9, and sit at the end of a full
@@ -382,6 +406,13 @@ async function saveConversationField(userId, registrationId, field, value) {
   }
 
   await registrationRepository.update(registrationId, update);
+
+  // BookId depends on AccountRegType and the permanent address's Pincode, answerable in either
+  // order by the flow - re-resolve after whichever one just landed (AccountAddress_PR is the
+  // current/communication address, not the permanent one dbo.GetStateBookId's query reads).
+  if (field === 'AccountRegType' || field === 'AccountAddress') {
+    await resolveAndPersistBookId(registrationId);
+  }
 }
 
 // "Is your current address the same as your permanent address?" - Typebot's own choice-input
@@ -624,6 +655,12 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
       const pincode = extractPincode(extracted.address);
       if (pincode) addressUpdate[PINCODE_COLUMN_BY_ADDRESS_COLUMN[addressColumn]] = pincode;
       await registrationRepository.update(registrationId, addressUpdate);
+      // Most members fill the permanent address via a document upload (this branch), not the
+      // manual-typed chat question - BookId's resolution has to fire from here too, not just
+      // saveConversationField's AccountAddress branch, or it silently never runs for them.
+      if (addressColumn === 'AccountAddress') {
+        await resolveAndPersistBookId(registrationId);
+      }
     }
 
     // Whichever doc type happens to extract these - PAN/Passport for dob, Aadhaar/Voter ID for
