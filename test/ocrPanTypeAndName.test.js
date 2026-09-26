@@ -248,9 +248,12 @@ test('a BANK upload with no AccountName on file yet calls ocrProvider.extract wi
 });
 
 for (const [label, regType] of [['a domestic company (C)', 'C'], ['an NRI company (NC)', 'NC']]) {
-  test(`a BANK upload on ${label} account never sends holderName, even with an AccountName on file`, async (t) => {
+  test(`a BANK upload on ${label} account sends the company's own AccountName as holderName`, async (t) => {
     if (!dbAvailable) return t.skip('SQL Server is not reachable');
     if (!env.OCR_ENABLED) return t.skip('OCR_ENABLED is false locally');
+    // AccountName on the C/NC paths holds the COMPANY's own name (from COMPANY_PAN's OCR), not a
+    // person's - so it's correct to send it for the bank document's own name verification, same as
+    // the individual path already does with its own AccountName.
     const account = await makeAccount({ AccountRegType: regType, EntityType: 'CP', AccountName: 'SOME COMPANY NAME' });
     const userId = String(account.AccountId);
 
@@ -261,6 +264,6 @@ for (const [label, regType] of [['a domestic company (C)', 'C'], ['an NRI compan
     };
     await saveDocument(userId, userId, 'BANK', 'https://s3.amazonaws.com/bucket/passbook.jpg');
 
-    assert.equal(seenArgs.holderName, undefined);
+    assert.equal(seenArgs.holderName, 'SOME COMPANY NAME');
   });
 }
