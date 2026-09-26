@@ -584,12 +584,14 @@ async function runOcrAndPersist(registrationId, docType, documentUrl, addressSlo
       ? (addressSlot === DOC_TYPES.COMPANY_PAN ? 'c' : addressSlot === DOC_TYPES.PAN ? 'p' : undefined)
       : undefined;
     // holderName is sent for the OCR service's own name verification (DRIVING_LICENCE/PASSPORT/
-    // VOTER_ID/BANK only, confirmed with the OCR team - see httpOcrProvider.js). Never sent on the
-    // two company paths (C/NC): this app never collects a real person's name for a company
-    // registration - AccountAlias is the trade name, KindAttention1 is only the signatory's
-    // designation (job title), not a name.
-    const isCompanyPath = account?.AccountRegType === 'C' || account?.AccountRegType === 'NC';
-    const holderName = isCompanyPath ? undefined : account?.AccountName?.trim() || undefined;
+    // VOTER_ID/BANK only, confirmed with the OCR team - see httpOcrProvider.js). On the two company
+    // paths (C/NC), AccountName already holds the COMPANY's own name, not a person's - it comes from
+    // COMPANY_PAN's OCR (remapped to effective docType 'PAN' - see OCR_TYPE_BY_DOC_TYPE), whose own
+    // `name` field is the company's registered name on that PAN card, written into AccountName by
+    // the IDENTITY_OCR_DOC_TYPES block below. Sending it here lets the BANK OCR call verify the
+    // uploaded passbook/cheque is actually in the company's name, same as the individual path
+    // verifies its own AccountName against its bank document.
+    const holderName = account?.AccountName?.trim() || undefined;
     const extracted = normalizeExtracted(docType, await ocrProvider.extract({ docType, documentUrl, panHolderType, holderName }));
 
     // A member could upload their own PAN, then a different person's Aadhaar/Passport - nothing

@@ -173,7 +173,10 @@ async function buildReview(userId) {
       title: `Your songs (${works.length})`,
       lines: works.map((work) => ({
         label: null,
-        value: [work.SongName, work.Artist_Singers].filter(Boolean).join(' - ') || work.DigitalLink,
+        // A missing SongName (workLinkResolver.service.js should now always fill it for a resolvable
+        // YouTube/Spotify link, but a fetch failure or an older row can still leave it null) falls
+        // back to the link itself rather than silently reading as a bare list of names.
+        value: [work.SongName ?? work.DigitalLink, work.Artist_Singers].filter(Boolean).join(' - '),
       })),
     });
   }

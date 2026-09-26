@@ -71,9 +71,12 @@ const envSchema = z.object({
     .default('true')
     .transform((v) => v !== 'false'),
 
-  // YouTube metadata comes from the keyless oEmbed endpoint - there is no YouTube Data API key
-  // for this project, see work/services/youtube.service.js.
+  // YouTube metadata's key-free path is the oEmbed endpoint (title/channel only) - see
+  // work/services/youtube.service.js. YOUTUBE_API_KEY is optional: when set, musicCredits.service.js
+  // uses the real YouTube Data API as a fallback description/publish-date source for videos
+  // InnerTube has nothing structured for (not registered on YouTube Music).
   YOUTUBE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  YOUTUBE_API_KEY: z.string().optional(),
   // Gemini splits a YouTube title into song/artists/album. Optional: leave GEMINI_API_KEY blank and
   // the flow falls back to the raw video title instead of breaking.
   GEMINI_API_KEY: z.string().optional(),
